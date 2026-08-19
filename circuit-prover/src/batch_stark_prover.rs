@@ -649,6 +649,10 @@ where
     pub proof: BatchProof<SC>,
     /// Packing configuration used for the Witness, Public, and unified ALU tables.
     pub table_packing: TablePacking,
+    /// Base-field coefficients of the leading circuit public inputs explicitly exposed by the
+    /// primitive public table.
+    #[serde(default)]
+    pub exposed_public_values: Vec<Val<SC>>,
     /// The number of rows in each of the circuit tables.
     pub rows: RowCounts,
     /// Variant used for the primitive ALU table.
@@ -706,6 +710,17 @@ where
         }
         self.rows.validate()?;
         self.table_packing.validate()?;
+        let expected_public_values = self
+            .table_packing
+            .exposed_public_inputs()
+            .checked_mul(self.ext_degree)
+            .ok_or(ProofMetadataError::ExposedPublicValueCountOverflow)?;
+        if self.exposed_public_values.len() != expected_public_values {
+            return Err(ProofMetadataError::ExposedPublicValueLenMismatch {
+                expected: expected_public_values,
+                got: self.exposed_public_values.len(),
+            });
+        }
         for entry in &self.non_primitives {
             entry.validate()?;
         }
@@ -742,6 +757,18 @@ pub enum ProofMetadataError {
     /// A primitive lane count is zero (`new`/`with_*` clamp to at least 1).
     #[error("`{0}` lane count must be at least 1")]
     ZeroLanes(&'static str),
+
+    /// Exposed public-input operations must all fit in row zero.
+    #[error("exposed public-input count {exposed} exceeds public-table lanes {lanes}")]
+    ExposedPublicInputsExceedLanes { exposed: usize, lanes: usize },
+
+    /// Multiplying exposed operations by the extension degree overflowed.
+    #[error("exposed public-value count overflow")]
+    ExposedPublicValueCountOverflow,
+
+    /// The serialized exposed public values do not match the declared packing and degree.
+    #[error("exposed public-value length mismatch: expected {expected}, got {got}")]
+    ExposedPublicValueLenMismatch { expected: usize, got: usize },
 
     /// A non-primitive table lane count is zero (defaults/clamps to at least 1).
     #[error("non-primitive table `{0:?}` lane count must be at least 1")]
@@ -1394,6 +1421,7 @@ where
         let public_prep = primitive[PrimitiveOpType::Public as usize].clone();
         let public_air =
             PublicAir::<Val<SC>, D>::new_with_preprocessed(public_rows, public_lanes, public_prep)
+                .with_exposed_ops(packing.exposed_public_inputs())
                 .with_min_height(min_height);
         let public_matrix: RowMajorMatrix<Val<SC>> = PublicAir::<Val<SC>, D>::trace_to_matrix(
             &traces.public_trace,
@@ -1608,7 +1636,21 @@ where
 
         air_storage.push(CircuitTableAir::Public(public_air));
         trace_storage.push(public_matrix);
-        public_storage.push(Vec::new());
+        let exposed_public_values: Vec<Val<SC>> = traces
+            .public_trace
+            .values
+            .iter()
+            .take(packing.exposed_public_inputs())
+            .flat_map(|value| value.as_basis_coefficients_slice().iter().copied())
+            .collect();
+        let expected_exposed_values = packing.exposed_public_inputs() * D;
+        if exposed_public_values.len() != expected_exposed_values {
+            return Err(BatchStarkProverError::Verify(format!(
+                "requested {expected_exposed_values} exposed public values, but the public trace supplied {}",
+                exposed_public_values.len()
+            )));
+        }
+        public_storage.push(exposed_public_values.clone());
 
         air_storage.push(CircuitTableAir::Alu(alu_air));
         trace_storage.push(alu_matrix);
@@ -1747,6 +1789,7 @@ where
         Ok(BatchStarkProof {
             proof,
             table_packing: effective_packing,
+            exposed_public_values,
             rows: RowCounts::new([const_rows_padded, public_rows_padded, alu_rows_padded]),
             alu_variant: self.alu_variant,
             ext_degree: D,
@@ -1787,6 +1830,7 @@ where
         );
         let public_air = CircuitTableAir::Public(
             PublicAir::<Val<SC>, D>::new(proof.rows[PrimitiveTable::Public], public_lanes)
+                .with_exposed_ops(packing.exposed_public_inputs())
                 .with_min_height(min_height),
         );
         let horner_k = packing.horner_packed_steps();
@@ -1806,6 +1850,7 @@ where
         let mut pvs: Vec<Vec<Val<SC>>> =
             Vec::with_capacity(NUM_PRIMITIVE_TABLES + proof.non_primitives.len());
         pvs.resize_with(NUM_PRIMITIVE_TABLES, Vec::new);
+        pvs[PrimitiveTable::Public as usize] = proof.exposed_public_values.clone();
 
         for entry in &proof.non_primitives {
             let pi = *prover_index_by_type.get(&entry.op_type).ok_or_else(|| {

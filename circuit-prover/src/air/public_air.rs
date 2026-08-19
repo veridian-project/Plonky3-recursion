@@ -45,6 +45,8 @@ pub struct WitnessSendAir<F, const D: usize = 1> {
     pub num_ops: usize,
     /// Number of independent public inputs packed per trace row.
     pub lanes: usize,
+    /// Number of leading operations in the first row exposed as AIR public values.
+    pub exposed_ops: usize,
     /// Preprocessed witness indices for the public inputs.
     pub preprocessed: Vec<F>,
     /// Minimum trace height (for FRI compatibility with higher log_final_poly_len).
@@ -67,6 +69,7 @@ impl<F: Field, const D: usize> WitnessSendAir<F, D> {
         Self {
             num_ops,
             lanes,
+            exposed_ops: 0,
             preprocessed: Vec::new(),
             min_height: 1,
             _phantom: PhantomData,
@@ -85,6 +88,7 @@ impl<F: Field, const D: usize> WitnessSendAir<F, D> {
         Self {
             num_ops,
             lanes,
+            exposed_ops: 0,
             preprocessed,
             min_height: 1,
             _phantom: PhantomData,
@@ -97,6 +101,17 @@ impl<F: Field, const D: usize> WitnessSendAir<F, D> {
     /// So `min_height` should be >= `2^(log_final_poly_len + log_blowup + 1)`.
     pub const fn with_min_height(mut self, min_height: usize) -> Self {
         self.min_height = min_height;
+        self
+    }
+
+    /// Expose the first `count` operations in row zero as AIR public values.
+    #[must_use]
+    pub const fn with_exposed_ops(mut self, count: usize) -> Self {
+        assert!(
+            count <= self.lanes,
+            "exposed operations must fit in row zero"
+        );
+        self.exposed_ops = count;
         self
     }
 
@@ -179,6 +194,10 @@ impl<F: Field, const D: usize> BaseAir<F> for WitnessSendAir<F, D> {
         self.lanes * Self::preprocessed_lane_width()
     }
 
+    fn num_public_values(&self) -> usize {
+        self.exposed_ops * D
+    }
+
     fn preprocessed_trace(&self) -> Option<RowMajorMatrix<F>> {
         let width = self.lanes * Self::preprocessed_lane_width();
         let mut mat = RowMajorMatrix::from_flat_padded(self.preprocessed.to_vec(), width, F::ZERO);
@@ -204,6 +223,20 @@ where
         let main_local = main.current_slice();
         let prep = builder.preprocessed().clone();
         let prep_local = prep.current_slice();
+        let public_values = builder.public_values().to_vec();
+
+        debug_assert_eq!(public_values.len(), self.exposed_ops * D);
+        {
+            let mut first_row = builder.when_first_row();
+            for lane in 0..self.exposed_ops {
+                for coefficient in 0..D {
+                    first_row.assert_eq(
+                        main_local[lane * D + coefficient],
+                        public_values[lane * D + coefficient],
+                    );
+                }
+            }
+        }
 
         let lane_w = Self::lane_width();
         let prep_lane_w = Self::preprocessed_lane_width();

@@ -10,6 +10,10 @@ use crate::ProofMetadataError;
 pub struct TablePacking {
     /// Number of public-input operations packed per AIR row.
     public_lanes: usize,
+    /// Number of leading circuit public-input operations whose base-field coefficients are
+    /// exposed as STARK public values. These operations must fit in the first packed row.
+    #[serde(default)]
+    exposed_public_inputs: usize,
     /// Number of ALU operations packed per AIR row.
     alu_lanes: usize,
     /// Per-NPO lane counts: `(op_type, lanes)`. Defaults to 1 for any op not listed.
@@ -37,6 +41,7 @@ impl TablePacking {
     pub fn new(public_lanes: usize, alu_lanes: usize) -> Self {
         Self {
             public_lanes: public_lanes.max(1),
+            exposed_public_inputs: 0,
             alu_lanes: alu_lanes.max(1),
             npo_lanes: Vec::new(),
             min_trace_height: 1,
@@ -60,6 +65,20 @@ impl TablePacking {
     pub fn with_public_alu_lanes(mut self, public_lanes: usize, alu_lanes: usize) -> Self {
         self.public_lanes = public_lanes.max(1);
         self.alu_lanes = alu_lanes.max(1);
+        self
+    }
+
+    /// Expose the first `count` circuit public-input operations as STARK public values.
+    ///
+    /// Each operation contributes `D` base-field values for a circuit over an extension of
+    /// degree `D`. The exposed operations must fit in the first packed public-table row.
+    #[must_use]
+    pub fn with_exposed_public_inputs(mut self, count: usize) -> Self {
+        assert!(
+            count <= self.public_lanes,
+            "exposed public inputs must fit in the first packed public-table row"
+        );
+        self.exposed_public_inputs = count;
         self
     }
 
@@ -110,6 +129,12 @@ impl TablePacking {
         self.public_lanes
     }
 
+    /// Return the number of leading circuit public-input operations exposed as STARK public
+    /// values.
+    pub const fn exposed_public_inputs(&self) -> usize {
+        self.exposed_public_inputs
+    }
+
     /// Return the number of ALU operations packed per AIR row.
     pub const fn alu_lanes(&self) -> usize {
         self.alu_lanes
@@ -143,6 +168,12 @@ impl TablePacking {
         }
         if self.alu_lanes == 0 {
             return Err(ProofMetadataError::ZeroLanes("alu_lanes"));
+        }
+        if self.exposed_public_inputs > self.public_lanes {
+            return Err(ProofMetadataError::ExposedPublicInputsExceedLanes {
+                exposed: self.exposed_public_inputs,
+                lanes: self.public_lanes,
+            });
         }
         for (op_type, lanes) in &self.npo_lanes {
             if *lanes == 0 {

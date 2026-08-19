@@ -278,10 +278,10 @@ where
         CircuitTablesAir::Const(ConstAir::<Val<SC>, TRACE_D>::new(
             rows[PrimitiveTable::Const],
         )),
-        CircuitTablesAir::Public(PublicAir::<Val<SC>, TRACE_D>::new(
-            rows[PrimitiveTable::Public],
-            public_lanes,
-        )),
+        CircuitTablesAir::Public(
+            PublicAir::<Val<SC>, TRACE_D>::new(rows[PrimitiveTable::Public], public_lanes)
+                .with_exposed_ops(packing.exposed_public_inputs()),
+        ),
         CircuitTablesAir::Alu(alu_air),
     ];
 
@@ -312,6 +312,7 @@ where
     }
 
     let mut air_public_counts = vec![0usize; NUM_PRIMITIVE_TABLES];
+    air_public_counts[PrimitiveTable::Public as usize] = proof.exposed_public_values.len();
     for entry in &proof.non_primitives {
         air_public_counts.push(entry.public_values.len());
     }
