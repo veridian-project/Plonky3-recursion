@@ -379,16 +379,18 @@ impl<F: Field> Circuit<F> {
                     });
 
                     // b and out creator flags (now independent).
-                    // Private inputs can be b-creators even in the forward case.
-                    let b_is_private_creator =
-                        !b_already_defined && private_input_wids.contains(&b.0);
+                    // Private inputs and hint outputs can be b-creators even in
+                    // the forward case, matching the a/c operand handling above.
+                    let b_is_input_creator = !b_already_defined
+                        && (private_input_wids.contains(&b.0)
+                            || hint_output_wids.contains(&b.0));
                     // A hint output in the `out` slot is a backward op: the hint value is given,
                     // so `b` is the witness this row solves for and takes the bus creator role
                     // (the hint output itself is still created via `out_is_creator`).
                     let out_is_backward = out_already_defined || hint_output_wids.contains(&out.0);
                     let out_is_creator = F::from_bool(!out_already_defined);
                     let b_is_creator =
-                        F::from_bool(b_is_private_creator || out_is_backward && !b_already_defined);
+                        F::from_bool(b_is_input_creator || out_is_backward && !b_already_defined);
 
                     preprocessed.primitive[PrimitiveOpType::Alu as usize].extend([
                         sel_add_vs_mul,
@@ -462,9 +464,24 @@ impl<F: Field> Circuit<F> {
                 } => {
                     executor.preprocess(inputs, outputs, &mut preprocessed)?;
 
+                    let op_type = executor.op_type();
+                    // `recompose/coeff` advertises hint-derived coefficient inputs as
+                    // WitnessChecks creators. Mark them defined before later ALU uses so
+                    // those operations become readers instead of double-creating the value.
+                    if *op_type == NpoTypeId::recompose_with_coeff_lookups() {
+                        for wid in inputs.iter().flatten() {
+                            if hint_output_wids.contains(&wid.0) {
+                                let wid_idx = wid.0 as usize;
+                                if wid_idx >= defined.len() {
+                                    defined.resize(wid_idx + 1, false);
+                                }
+                                defined[wid_idx] = true;
+                            }
+                        }
+                    }
+
                     // Track duplicate non-primitive outputs: first occurrence is a creator,
                     // subsequent occurrences are treated as readers on WitnessChecks.
-                    let op_type = executor.op_type();
                     let n_exposed = executor.num_exposed_outputs().unwrap_or(outputs.len());
                     for out_limb in outputs.iter().take(n_exposed) {
                         for wid in out_limb {

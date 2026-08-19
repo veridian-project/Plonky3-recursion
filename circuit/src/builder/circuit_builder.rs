@@ -3195,6 +3195,84 @@ mod proptests {
     }
 
     #[test]
+    fn test_decomposition_hint_coefficient_can_create_b_operand() {
+        type Ext4 = BinomialExtensionField<BabyBear, 4>;
+
+        let mut builder = CircuitBuilder::<Ext4>::new();
+        builder.enable_recompose::<BabyBear>(
+            crate::ops::recompose::generate_recompose_trace::<BabyBear, Ext4>,
+        );
+        let x = builder.public_input();
+        let coeffs = builder.decompose_ext_to_base_coeffs::<BabyBear>(x).unwrap();
+        let one = builder.define_const(Ext4::ONE);
+        builder.add(one, coeffs[0]);
+
+        let circuit = builder.build().expect("Failed to build circuit");
+        let coefficient_witness = circuit.expr_to_widx[&coeffs[0]];
+        let alu_ordinal = circuit
+            .ops
+            .iter()
+            .filter(|op| matches!(op, crate::ops::Op::Alu { .. }))
+            .position(|op| {
+                matches!(
+                    op,
+                    crate::ops::Op::Alu { b, .. } if *b == coefficient_witness
+                )
+            })
+            .expect("decomposition coefficient is used as an ALU b operand");
+        let preprocessed = circuit
+            .generate_preprocessed_columns::<4>()
+            .expect("generate preprocessed circuit columns");
+        let alu_row = &preprocessed.primitive[crate::ops::PrimitiveOpType::Alu as usize]
+            [alu_ordinal * 12..(alu_ordinal + 1) * 12];
+        assert_eq!(alu_row[9], Ext4::ONE, "b operand must create the hint output");
+    }
+
+    #[test]
+    fn test_coeff_recompose_creates_hint_before_b_operand_reads_it() {
+        type Ext4 = BinomialExtensionField<BabyBear, 4>;
+
+        let mut builder = CircuitBuilder::<Ext4>::new();
+        builder.enable_recompose::<BabyBear>(
+            crate::ops::recompose::generate_recompose_trace::<BabyBear, Ext4>,
+        );
+        builder.set_recompose_coeff_ctl_for_decompose_links(true);
+        let x = builder.public_input();
+        let coeffs = builder.decompose_ext_to_base_coeffs::<BabyBear>(x).unwrap();
+        let one = builder.define_const(Ext4::ONE);
+        builder.add(one, coeffs[0]);
+
+        let circuit = builder.build().expect("Failed to build circuit");
+        let coefficient_witness = circuit.expr_to_widx[&coeffs[0]];
+        let alu_ordinal = circuit
+            .ops
+            .iter()
+            .filter(|op| matches!(op, crate::ops::Op::Alu { .. }))
+            .position(|op| {
+                matches!(
+                    op,
+                    crate::ops::Op::Alu { b, .. } if *b == coefficient_witness
+                )
+            })
+            .expect("decomposition coefficient is used as an ALU b operand");
+        let preprocessed = circuit
+            .generate_preprocessed_columns::<4>()
+            .expect("generate preprocessed circuit columns");
+        let alu_row = &preprocessed.primitive[crate::ops::PrimitiveOpType::Alu as usize]
+            [alu_ordinal * 12..(alu_ordinal + 1) * 12];
+        assert_eq!(
+            alu_row[9],
+            Ext4::ZERO,
+            "recompose/coeff must create the hint output before the ALU reads it"
+        );
+        assert_eq!(
+            preprocessed.ext_reads[coefficient_witness.0 as usize],
+            1,
+            "the ALU b operand must be counted as a recompose/coeff reader"
+        );
+    }
+
+    #[test]
     fn test_decompose_recompose_round_trip() {
         type Ext4 = BinomialExtensionField<BabyBear, 4>;
 
