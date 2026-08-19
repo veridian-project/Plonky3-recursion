@@ -724,6 +724,12 @@ impl<V: PoseidonVariant> PoseidonPermExecutor<V> {
             }
 
             let cap_chain_enable = !self.new_start;
+            let raw_compression = self.merkle_path
+                && self.new_start
+                && inputs
+                    .iter()
+                    .take(width_ext)
+                    .all(|input| Self::limb_ctl_enabled(input));
             let mut hdr = Vec::with_capacity(rate_ext + 2 + rate_ext + rate_ext);
             for inp in inputs.iter().take(rate_ext) {
                 hdr.push(F::from_bool(Self::limb_ctl_enabled(inp)));
@@ -731,7 +737,11 @@ impl<V: PoseidonVariant> PoseidonPermExecutor<V> {
             // Reuse the former unused `cap_in_ctl` slot to carry the prefix-free sponge length tag:
             // the first capacity element is bound to `+= absorb_len` by the compact-D1 AIR. Zero on
             // non-sponge rows leaves the original zero-capacity / chain behaviour intact.
-            hdr.push(F::from_u8(self.absorb_len as u8));
+            hdr.push(if self.merkle_path {
+                F::from_bool(raw_compression)
+            } else {
+                F::from_u8(self.absorb_len as u8)
+            });
             hdr.push(F::from_bool(cap_chain_enable));
             for inp in inputs.iter().take(rate_ext) {
                 let ctl = Self::limb_ctl_enabled(inp);
@@ -748,7 +758,7 @@ impl<V: PoseidonVariant> PoseidonPermExecutor<V> {
                     preprocessed
                         .register_non_primitive_preprocessed_no_read(&self.op_type, &[F::ZERO]);
                 } else if let [wid] = inp.as_slice() {
-                    if self.merkle_path {
+                    if self.merkle_path && !raw_compression {
                         preprocessed.register_non_primitive_preprocessed_no_read(
                             &self.op_type,
                             &[preprocessed.witness_index_as_field(*wid)],

@@ -13,7 +13,8 @@ use p3_batch_stark::{ProverData, StarkInstance, prove_batch, verify_batch};
 use p3_challenger::DuplexChallenger;
 use p3_circuit::CircuitBuilder;
 use p3_circuit::ops::{
-    GoldilocksD1Width12, Poseidon2Config, generate_poseidon2_trace, generate_recompose_trace,
+    GoldilocksD1Width12, Poseidon2Config, Poseidon2PermCall, generate_poseidon2_trace,
+    generate_recompose_trace,
 };
 use p3_circuit_prover::batch_stark_prover::{
     poseidon2_air_builders_d5, poseidon2_table_provers_binomial_d5, recompose_air_builders,
@@ -167,6 +168,129 @@ fn outer_config() -> OuterConfig {
     let fri_params = FriParameters::new_testing(challenge_mmcs, 0);
     let pcs = OuterPcs::new(Dft::default(), val_mmcs, fri_params);
     OuterConfig::new(pcs, Challenger::new(perm))
+}
+
+#[test]
+fn veridian_d5_w12_raw_compression_binds_every_input() {
+    let mut circuit_builder = CircuitBuilder::<Challenge>::new();
+    circuit_builder.enable_poseidon2_perm_base_width_12::<GoldilocksD1Width12, _>(
+        generate_poseidon2_trace::<Challenge, GoldilocksD1Width12>,
+        LiftBasePermutation::new(veridian_perm()),
+    );
+    circuit_builder.enable_recompose::<F>(generate_recompose_trace::<F, Challenge>);
+    circuit_builder.set_recompose_coeff_ctl_for_decompose_links(true);
+
+    let input_targets = circuit_builder.alloc_private_inputs(WIDTH, "raw_compression_input");
+    let base_input_targets: Vec<_> = input_targets
+        .iter()
+        .copied()
+        .map(|target| {
+            let coefficients = circuit_builder
+                .decompose_ext_to_base_coeffs::<F>(target)
+                .expect("decompose raw compression input");
+            for coefficient in coefficients.iter().skip(1) {
+                let squared = circuit_builder.mul(*coefficient, *coefficient);
+                circuit_builder.assert_zero(squared);
+            }
+            coefficients[0]
+        })
+        .collect();
+    let direction = circuit_builder.define_const(Challenge::ZERO);
+    let (_, outputs) = circuit_builder
+        .add_poseidon2_perm(&Poseidon2PermCall {
+            config: Poseidon2Config::GOLDILOCKS_D1_W12,
+            new_start: true,
+            merkle_path: true,
+            mmcs_bit: Some(direction),
+            mmcs_bit2: None,
+            inputs: base_input_targets.iter().copied().map(Some).collect(),
+            out_ctl: vec![true; RATE],
+            return_all_outputs: false,
+            absorb_len: 0,
+            mmcs_index_sum: None,
+        })
+        .expect("build the raw compression row");
+    let expected_targets: Vec<_> = (0..RATE).map(|_| circuit_builder.public_input()).collect();
+    for (output, expected) in outputs[..RATE]
+        .iter()
+        .map(|output| output.expect("raw compression output is missing"))
+        .zip(expected_targets)
+    {
+        let difference = circuit_builder.sub(output, expected);
+        let squared = circuit_builder.mul(difference, difference);
+        circuit_builder.assert_zero(squared);
+    }
+
+    let circuit = circuit_builder
+        .build()
+        .expect("build raw compression circuit");
+    let native_inputs: [F; WIDTH] = core::array::from_fn(|index| F::from_usize(index + 1));
+    let native_outputs = veridian_perm().permute(native_inputs);
+    let public_inputs: Vec<_> = native_outputs[..RATE]
+        .iter()
+        .copied()
+        .map(Challenge::from)
+        .collect();
+    let private_inputs: Vec<_> = native_inputs.into_iter().map(Challenge::from).collect();
+    let mut runner = circuit.runner();
+    runner
+        .set_public_inputs(&public_inputs)
+        .expect("set raw compression outputs");
+    runner
+        .set_private_inputs(&private_inputs)
+        .expect("set raw compression inputs");
+    let traces = runner.run().expect("execute raw compression circuit");
+
+    let packing = TablePacking::new(RATE, 8).with_exposed_public_inputs(RATE);
+    let preprocessors: Vec<Box<dyn NpoPreprocessor<F>>> = vec![
+        Box::new(Poseidon2Preprocessor),
+        Box::new(RecomposePreprocessor::new(true)),
+    ];
+    let mut air_builders = poseidon2_air_builders_d5::<OuterConfig>();
+    air_builders.extend(recompose_air_builders::<OuterConfig, 5>(1, true));
+    let (airs_degrees, primitive_columns, non_primitive_columns) =
+        get_airs_and_degrees_with_prep::<OuterConfig, _, 5>(
+            &circuit,
+            &packing,
+            &preprocessors,
+            &air_builders,
+            ConstraintProfile::Standard,
+        )
+        .expect("lower raw compression circuit");
+    let (airs, degrees): (Vec<_>, Vec<_>) = airs_degrees.into_iter().unzip();
+    let config = outer_config();
+    let prover_data = ProverData::from_airs_and_degrees(&config, &airs, &degrees);
+    let circuit_prover_data =
+        CircuitProverData::new(prover_data, primitive_columns, non_primitive_columns);
+    let mut prover = BatchStarkProver::new(config).with_table_packing(packing);
+    for table in poseidon2_table_provers_binomial_d5(Poseidon2Config::GOLDILOCKS_D1_W12) {
+        prover.register_table_prover(table);
+    }
+    for table in
+        p3_circuit_prover::batch_stark_prover::recompose_table_provers::<OuterConfig, 5>(1, true)
+    {
+        prover.register_table_prover(table);
+    }
+    let proof = prover
+        .prove_all_tables(&traces, &circuit_prover_data)
+        .expect("prove raw compression circuit");
+    prover
+        .verify_all_tables::<Challenge>(&proof)
+        .expect("raw compression witness bus must balance");
+
+    let mut tampered = private_inputs;
+    tampered[0] += Challenge::ONE;
+    let mut tampered_runner = circuit.runner();
+    tampered_runner
+        .set_public_inputs(&public_inputs)
+        .expect("set tampered raw compression outputs");
+    tampered_runner
+        .set_private_inputs(&tampered)
+        .expect("set tampered raw compression inputs");
+    assert!(
+        tampered_runner.run().is_err(),
+        "changing one raw compression input must not preserve the claimed output"
+    );
 }
 
 #[test]

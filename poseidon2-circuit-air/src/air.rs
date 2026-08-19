@@ -728,6 +728,8 @@ pub fn extract_preprocessed_from_operations<
         debug_assert_eq!(output_indices.len(), OL);
 
         if compact_d1 {
+            let raw_compression =
+                *merkle_path && *new_start && in_ctl.iter().take(IL).all(|ctl| *ctl);
             for ctl in in_ctl.iter().take(OL) {
                 preprocessed.push(F::from_bool(*ctl));
             }
@@ -740,7 +742,7 @@ pub fn extract_preprocessed_from_operations<
                 }
             }
             let cap_chain_enable = !*new_start;
-            preprocessed.push(F::ZERO);
+            preprocessed.push(F::from_bool(raw_compression));
             preprocessed.push(F::from_bool(cap_chain_enable));
             for ctl in in_ctl.iter().take(OL) {
                 preprocessed.push(F::from_bool(!*new_start && !*merkle_path && !ctl));
@@ -1725,7 +1727,8 @@ fn eval_interactions_inner<
         debug_assert_eq!(next_preprocessed.len(), tail + 4);
 
         let merkle_path_p: AB::Expr = local_preprocessed[tail + 3].into();
-        let not_merkle = AB::Expr::ONE - merkle_path_p;
+        let not_merkle = AB::Expr::ONE - merkle_path_p.clone();
+        let raw_compression: AB::Expr = local_preprocessed[RATE_EXT].into() * merkle_path_p.clone();
         let idx_base = hdr;
 
         // Input limb sends (rate only; capacity is zero-asserted in eval)
@@ -1746,9 +1749,28 @@ fn eval_interactions_inner<
             let mult = if is_arity4 {
                 in_ctl
             } else {
-                in_ctl * not_merkle.clone()
+                in_ctl * (not_merkle.clone() + raw_compression.clone())
             };
             builder.push_interaction("WitnessChecks", input_idx_limb, Count::bounded(-mult, 1));
+        }
+
+        if !is_arity4 {
+            for limb_idx in RATE_EXT..WIDTH_EXT {
+                let idx: AB::Expr = local_preprocessed[idx_base + limb_idx].into();
+                let mut input_idx_limb: Vec<AB::Expr> = Vec::with_capacity(WITNESS_EXT_D + 1);
+                input_idx_limb.push(idx);
+                for d in 0..D {
+                    input_idx_limb.push(local.perm.inputs[limb_idx * D + d].into());
+                }
+                for _ in 0..(WITNESS_EXT_D - D) {
+                    input_idx_limb.push(AB::Expr::ZERO);
+                }
+                builder.push_interaction(
+                    "WitnessChecks",
+                    input_idx_limb,
+                    Count::bounded(-raw_compression.clone(), 1),
+                );
+            }
         }
 
         // Output limb receives
