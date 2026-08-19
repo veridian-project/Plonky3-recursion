@@ -13,6 +13,7 @@
 //!     KoalaBear   4                  24            23
 //!     KoalaBear   1                  32            31
 //!     KoalaBear   4                  32            31
+//!     Goldilocks  1                  12            22
 //!     Goldilocks  2                   8            22
 //!     Goldilocks  2                  16            22
 //! ```
@@ -421,6 +422,50 @@ impl KoalaBearD4Width32 {
     }
 }
 
+/// Fixed seed for Veridian's width-12 Goldilocks Poseidon2 permutation.
+///
+/// This value is consensus-critical: it must match `veridian-zk` and
+/// `veridian-primitives` exactly.
+pub const VERIDIAN_GOLDILOCKS_W12_SEED: u64 = 0x0056_4552_4944_414e;
+
+/// Configuration for Goldilocks base-field (`D=1`) Poseidon2 with a
+/// 12-element state. A quintic recursive verifier uses this table with
+/// witness-bus keys padded to degree five.
+pub struct GoldilocksD1Width12;
+
+impl Poseidon2Params for GoldilocksD1Width12 {
+    type BaseField = Goldilocks;
+    const CONFIG: Poseidon2Config = Poseidon2Config::GOLDILOCKS_D1_W12;
+}
+
+impl GoldilocksD1Width12 {
+    pub fn default_air() -> Poseidon2CircuitAirGoldilocksD1Width12 {
+        Poseidon2CircuitAirGoldilocksD1Width12::new(goldilocks_d1_width12_round_constants())
+    }
+
+    pub fn default_air_with_preprocessed(
+        preprocessed: Vec<Goldilocks>,
+        min_height: usize,
+    ) -> Poseidon2CircuitAirGoldilocksD1Width12 {
+        Poseidon2CircuitAirGoldilocksD1Width12::new_with_preprocessed(
+            goldilocks_d1_width12_round_constants(),
+            preprocessed,
+        )
+        .with_min_height(min_height)
+    }
+
+    pub fn default_air_with_preprocessed_witness_bus5(
+        preprocessed: Vec<Goldilocks>,
+        min_height: usize,
+    ) -> Poseidon2CircuitAirGoldilocksD1Width12WitnessBus5 {
+        Poseidon2CircuitAirGoldilocksD1Width12WitnessBus5::new_with_preprocessed(
+            goldilocks_d1_width12_round_constants(),
+            preprocessed,
+        )
+        .with_min_height(min_height)
+    }
+}
+
 /// Configuration for Goldilocks with quadratic extension (`D=2`) and a
 /// 16-element Poseidon2 state.
 ///
@@ -642,6 +687,38 @@ pub type Poseidon2CircuitAirBabyBearD4Width32 = Poseidon2CircuitAir<
     { BabyBearD4Width32::D },
 >;
 
+/// Goldilocks Poseidon2 circuit AIR with base-field challenges and a 12-element state.
+pub type Poseidon2CircuitAirGoldilocksD1Width12 = Poseidon2CircuitAir<
+    Goldilocks,
+    GenericPoseidon2LinearLayersGoldilocks,
+    { GoldilocksD1Width12::D },
+    { GoldilocksD1Width12::WIDTH },
+    { GoldilocksD1Width12::WIDTH_EXT },
+    { GoldilocksD1Width12::RATE_EXT },
+    { GoldilocksD1Width12::CAPACITY_EXT },
+    { GoldilocksD1Width12::SBOX_DEGREE },
+    { GoldilocksD1Width12::SBOX_REGISTERS },
+    { GoldilocksD1Width12::HALF_FULL_ROUNDS },
+    { GoldilocksD1Width12::PARTIAL_ROUNDS },
+    { GoldilocksD1Width12::D },
+>;
+
+/// [`GoldilocksD1Width12`] with witness-bus keys padded to quintic width.
+pub type Poseidon2CircuitAirGoldilocksD1Width12WitnessBus5 = Poseidon2CircuitAir<
+    Goldilocks,
+    GenericPoseidon2LinearLayersGoldilocks,
+    { GoldilocksD1Width12::D },
+    { GoldilocksD1Width12::WIDTH },
+    { GoldilocksD1Width12::WIDTH_EXT },
+    { GoldilocksD1Width12::RATE_EXT },
+    { GoldilocksD1Width12::CAPACITY_EXT },
+    { GoldilocksD1Width12::SBOX_DEGREE },
+    { GoldilocksD1Width12::SBOX_REGISTERS },
+    { GoldilocksD1Width12::HALF_FULL_ROUNDS },
+    { GoldilocksD1Width12::PARTIAL_ROUNDS },
+    5,
+>;
+
 /// Goldilocks Poseidon2 circuit AIR with quadratic extension and 16-element state (arity-4 compression).
 pub type Poseidon2CircuitAirGoldilocksD2Width16 = Poseidon2CircuitAir<
     Goldilocks,
@@ -673,6 +750,15 @@ pub type Poseidon2CircuitAirGoldilocksD2Width8 = Poseidon2CircuitAir<
     { GoldilocksD2Width8::PARTIAL_ROUNDS },
     { GoldilocksD2Width8::D },
 >;
+
+/// Generate Veridian's consensus-critical width-12 Goldilocks round constants.
+pub fn goldilocks_d1_width12_round_constants() -> RoundConstants<Goldilocks, 12, 4, 22> {
+    let mut rng = SmallRng::seed_from_u64(VERIDIAN_GOLDILOCKS_W12_SEED);
+    let beginning_full = rng.sample(StandardUniform);
+    let ending_full = rng.sample(StandardUniform);
+    let partial = rng.sample(StandardUniform);
+    RoundConstants::new(beginning_full, partial, ending_full)
+}
 
 /// Generate deterministic round constants for the Goldilocks width-8
 /// configuration using a fixed seed.
@@ -743,6 +829,13 @@ const _: () = assert_circuit_cols_split::<
     { KoalaBearD4Width24::SBOX_REGISTERS },
     { KoalaBearD4Width24::HALF_FULL_ROUNDS },
     { KoalaBearD4Width24::PARTIAL_ROUNDS },
+>();
+const _: () = assert_circuit_cols_split::<
+    { GoldilocksD1Width12::WIDTH },
+    { GoldilocksD1Width12::SBOX_DEGREE },
+    { GoldilocksD1Width12::SBOX_REGISTERS },
+    { GoldilocksD1Width12::HALF_FULL_ROUNDS },
+    { GoldilocksD1Width12::PARTIAL_ROUNDS },
 >();
 const _: () = assert_circuit_cols_split::<
     { GoldilocksD2Width8::WIDTH },

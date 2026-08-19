@@ -1,5 +1,6 @@
 #![allow(clippy::upper_case_acronyms)]
 
+use alloc::borrow::Cow;
 use alloc::boxed::Box;
 use alloc::string::ToString;
 use alloc::vec::Vec;
@@ -117,7 +118,7 @@ where
         }
     }
 
-    fn periodic_columns(&self) -> Vec<Vec<Val<SC>>> {
+    fn periodic_columns(&self) -> Cow<'_, [Vec<Val<SC>>]> {
         match self {
             Self::Const(a) => P3BaseAir::periodic_columns(a),
             Self::Public(a) => P3BaseAir::periodic_columns(a),
@@ -325,13 +326,34 @@ where
     // the proof-supplied `common.lookups`, which drives the CTL folding, aux width, and
     // challenge layout. For an honest proof these are identical (both derived from the same
     // AIRs); a malformed or malicious lookup set is now ignored rather than believed.
+    if circuit_airs.len() != verifier_inputs.proof_targets.degree_bits.len() {
+        return Err(VerificationError::InvalidProofShape(format!(
+            "AIR count {} does not match degree-bit count {}",
+            circuit_airs.len(),
+            verifier_inputs.proof_targets.degree_bits.len()
+        )));
+    }
+    let is_zk = config.is_zk();
     verifier_inputs.common_data.lookups = circuit_airs
         .iter()
-        .map(|air| {
-            lookups_for_circuit_table_air::<SC, TRACE_D>(&air.to_table_air(), config.is_zk())
-                .to_vec()
+        .zip(&verifier_inputs.proof_targets.degree_bits)
+        .map(|(air, &ext_db)| {
+            let base_db = ext_db.checked_sub(is_zk).ok_or_else(|| {
+                VerificationError::InvalidProofShape(format!(
+                    "extended degree bits {ext_db} are smaller than hiding offset {is_zk}"
+                ))
+            })?;
+            let trace_len = 1usize.checked_shl(base_db as u32).ok_or_else(|| {
+                VerificationError::InvalidProofShape(format!(
+                    "base degree bits {base_db} exceed the platform limit"
+                ))
+            })?;
+            Ok(
+                lookups_for_circuit_table_air::<SC, TRACE_D>(&air.to_table_air(), trace_len, is_zk)
+                    .to_vec(),
+            )
         })
-        .collect();
+        .collect::<Result<_, VerificationError>>()?;
 
     let common = &verifier_inputs.common_data;
 
@@ -528,9 +550,21 @@ where
             ));
         }
 
+        let is_zk = config.is_zk();
+        let base_db = degree_bits[i].checked_sub(is_zk).ok_or_else(|| {
+            VerificationError::InvalidProofShape(
+                "Extended degree bits smaller than ZK adjustment".to_string(),
+            )
+        })?;
+        let trace_len = 1usize.checked_shl(base_db as u32).ok_or_else(|| {
+            VerificationError::InvalidProofShape(
+                "Base degree bits exceed the platform limit".to_string(),
+            )
+        })?;
         let log_qd = A::get_log_num_quotient_chunks(
             air,
             pre_w,
+            trace_len,
             &all_lookups[i],
             config.is_zk(),
             lookup_gadget,

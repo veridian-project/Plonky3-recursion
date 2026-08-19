@@ -1900,7 +1900,9 @@ mod test {
     use alloc::vec;
 
     use p3_baby_bear::{BabyBear, Poseidon2BabyBear};
+    use p3_field::PrimeCharacteristicRing;
     use p3_field::extension::BinomialExtensionField;
+    use p3_goldilocks::{Goldilocks, Poseidon2Goldilocks};
     use p3_koala_bear::KoalaBear;
     use p3_matrix::Matrix;
     use p3_poseidon2::ExternalLayerConstants;
@@ -1913,14 +1915,57 @@ mod test {
     use super::*;
     use crate::columns::{POSEIDON2_LIMBS, POSEIDON2_PUBLIC_OUTPUT_LIMBS};
     use crate::{
-        BabyBearD4Width32, GoldilocksD2Width16, KoalaBearD1Width32, KoalaBearD4Width32,
-        Poseidon2CircuitAirBabyBearD4Width16, Poseidon2CircuitAirBabyBearD4Width32,
-        Poseidon2CircuitAirKoalaBearD1Width32, Poseidon2CircuitAirKoalaBearD4Width32,
+        BabyBearD4Width32, GoldilocksD1Width12, GoldilocksD2Width16, KoalaBearD1Width32,
+        KoalaBearD4Width32, Poseidon2CircuitAirBabyBearD4Width16,
+        Poseidon2CircuitAirBabyBearD4Width32, Poseidon2CircuitAirKoalaBearD1Width32,
+        Poseidon2CircuitAirKoalaBearD4Width32, VERIDIAN_GOLDILOCKS_W12_SEED,
+        goldilocks_d1_width12_round_constants,
     };
 
     const WIDTH: usize = 16;
     type Val = BabyBear;
     type EF = BinomialExtensionField<Val, 4>;
+
+    #[test]
+    fn veridian_goldilocks_w12_air_matches_native_permutation() {
+        const GL_WIDTH: usize = 12;
+        const GL_RATE: usize = 6;
+
+        let mut rng = SmallRng::seed_from_u64(VERIDIAN_GOLDILOCKS_W12_SEED);
+        let perm = Poseidon2Goldilocks::<GL_WIDTH>::new_from_rng_128(&mut rng);
+        let state_0: [Goldilocks; GL_WIDTH] =
+            core::array::from_fn(|i| Goldilocks::from_usize(i + 1));
+        let state_1 = perm.permute(state_0);
+
+        let make_row =
+            |new_start: bool, input_values: [Goldilocks; GL_WIDTH]| Poseidon2CircuitRow {
+                new_start,
+                merkle_path: false,
+                mmcs_bit: false,
+                mmcs_bit2: false,
+                mmcs_index_sum: Goldilocks::ZERO,
+                input_values: input_values.to_vec(),
+                in_ctl: vec![false; GL_WIDTH],
+                input_indices: vec![0; GL_WIDTH],
+                out_ctl: vec![false; GL_RATE],
+                output_indices: vec![0; GL_RATE],
+                mmcs_index_sum_idx: 0,
+                mmcs_ctl_enabled: false,
+            };
+
+        let mut padded = vec![make_row(true, state_0), make_row(false, state_1)];
+        padded.resize(1 << 5, make_row(true, [Goldilocks::ZERO; GL_WIDTH]));
+
+        let preprocessed =
+            extract_preprocessed_from_operations::<GL_WIDTH, GL_RATE, Goldilocks, Goldilocks>(
+                &padded, 5, 1,
+            );
+        let constants = goldilocks_d1_width12_round_constants();
+        let air =
+            GoldilocksD1Width12::default_air_with_preprocessed_witness_bus5(preprocessed, 1 << 5);
+        let trace = air.generate_trace_rows(&padded, &constants, 0);
+        assert_air_satisfies::<Goldilocks, BinomialExtensionField<Goldilocks, 5>, _>(&air, &trace);
+    }
 
     /// Build constants + permutation from a seeded RNG; the same constants drive both the AIR
     /// and the native permutation used to compute reference outputs.

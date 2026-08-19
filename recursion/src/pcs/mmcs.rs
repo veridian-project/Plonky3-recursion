@@ -79,12 +79,26 @@ where
         let mut inputs: Vec<Option<Target>> = vec![None; width_ext];
 
         if use_per_base_lift {
-            // D=1 width-16 perm uses lifted scalars per rate slot. Opened batch values are already
-            // `EF::from(base)` targets (FRI BatchOpeningTargets); use them directly — recompose would
-            // add redundant NPO/ALU wiring and can desync witness sharing with cap/public inputs.
+            // A D=1 permutation uses lifted scalars per rate slot. Opened batch values are already
+            // `EF::from(base)` targets (FRI BatchOpeningTargets), so no coefficient recomposition is
+            // needed. Hiding-MMCS salts are different: they are private inputs whose first consumer
+            // can be this permutation NPO. Route the lifted value through one identity mul-add so the
+            // ALU table creates it on the WitnessChecks bus before Poseidon receives it.
+            let (one, zero) = if alu_recompose {
+                (
+                    Some(circuit.define_const(EF::ONE)),
+                    Some(circuit.define_const(EF::ZERO)),
+                )
+            } else {
+                (None, None)
+            };
             for ext_idx in 0..rate_ext {
                 if ext_idx < chunk.len() {
-                    inputs[ext_idx] = Some(chunk[ext_idx]);
+                    inputs[ext_idx] = Some(if let (Some(one), Some(zero)) = (one, zero) {
+                        circuit.mul_add(chunk[ext_idx], one, zero)
+                    } else {
+                        chunk[ext_idx]
+                    });
                 } else {
                     inputs[ext_idx] = None;
                 }

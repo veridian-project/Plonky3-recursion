@@ -81,6 +81,15 @@ impl Poseidon2Params for GoldilocksD2Width8 {
     const CONFIG: Poseidon2Config = Poseidon2Config::GOLDILOCKS_D2_W8;
 }
 
+/// Goldilocks D=1 Width=12 configuration for base-field challenger and MMCS
+/// permutations inside a quintic-extension recursive verifier.
+pub struct GoldilocksD1Width12;
+
+impl Poseidon2Params for GoldilocksD1Width12 {
+    type BaseField = p3_goldilocks::Goldilocks;
+    const CONFIG: Poseidon2Config = Poseidon2Config::GOLDILOCKS_D1_W12;
+}
+
 /// Poseidon2 operation table row.
 ///
 /// This implements the Poseidon Permutation Table specification.

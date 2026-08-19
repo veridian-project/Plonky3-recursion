@@ -39,6 +39,12 @@ pub struct PoseidonPermCall<V: PoseidonVariant> {
     /// When true, capacity outputs are also allocated and returned, but NOT CTL-verified
     /// (they are constrained only by the permutation itself).
     pub return_all_outputs: bool,
+    /// Prefix-free duplex-sponge length tag for compact D=1 rows.
+    ///
+    /// This is zero for extension-field, Merkle, and ordinary hash rows. A D=1 challenger sets
+    /// it to the number of absorbed rate elements so the AIR adds the tag to the first chained
+    /// capacity element without exposing capacity through the witness bus.
+    pub absorb_len: usize,
     /// Optional MMCS index accumulator value to expose.
     pub mmcs_index_sum: Option<ExprId>,
 }
@@ -55,6 +61,7 @@ impl<V: PoseidonVariant> Default for PoseidonPermCall<V> {
             inputs: vec![None; config.width_ext()],
             out_ctl: vec![false; config.rate_ext()],
             return_all_outputs: false,
+            absorb_len: 0,
             mmcs_index_sum: None,
         }
     }

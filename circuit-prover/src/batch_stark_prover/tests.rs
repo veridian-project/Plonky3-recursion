@@ -208,8 +208,9 @@ fn test_table_lookups() {
     assert!(prover.verify_all_tables::<BabyBear>(&proof).is_ok());
 
     // Check that the generated lookups are correct and consistent across tables.
-    for air in airs.iter() {
-        let lookups = crate::batch_stark_prover::lookups_for_circuit_table_air(air, 0);
+    for (air, &log_degree) in airs.iter().zip(&log_degrees) {
+        let lookups =
+            crate::batch_stark_prover::lookups_for_circuit_table_air(air, 1usize << log_degree, 0);
 
         match air {
             CircuitTableAir::Const(_) => {
@@ -394,8 +395,9 @@ fn test_extension_field_table_lookups() {
     );
 
     // Check that the generated lookups are correct and consistent across tables.
-    for air in airs.iter() {
-        let lookups = crate::batch_stark_prover::lookups_for_circuit_table_air(air, 0);
+    for (air, &log_degree) in airs.iter().zip(&log_degrees) {
+        let lookups =
+            crate::batch_stark_prover::lookups_for_circuit_table_air(air, 1usize << log_degree, 0);
 
         match air {
             CircuitTableAir::Const(_) => {

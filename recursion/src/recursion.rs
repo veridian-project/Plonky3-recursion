@@ -266,6 +266,7 @@ impl<F: Field, EF: ExtensionField<F>, LG: LookupProtocol> RecursiveAir<F, EF, LG
     fn get_log_num_quotient_chunks(
         &self,
         _preprocessed_width: usize,
+        _trace_len: usize,
         _contexts: &[Lookup<F>],
         _is_zk: usize,
         _lookup_gadget: &LG,

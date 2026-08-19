@@ -1,6 +1,7 @@
 //! Batch STARK prover and verifier that unifies all circuit tables
 //! into a single batched STARK proof using `p3-batch-stark`.
 
+use alloc::borrow::Cow;
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -69,8 +70,8 @@ pub use poseidon1::{
 };
 pub use poseidon2::{
     Poseidon2AirBuilder, Poseidon2AirBuilderForConfig, Poseidon2AirWrapperInner,
-    Poseidon2Preprocessor, Poseidon2Prover, Poseidon2ProverD2, poseidon2_preprocessor,
-    poseidon2_verifier_air_from_config,
+    Poseidon2Preprocessor, Poseidon2Prover, Poseidon2ProverBinomialD5, Poseidon2ProverD2,
+    poseidon2_preprocessor, poseidon2_verifier_air_from_config,
 };
 pub use recompose::{RecomposeAirBuilder, RecomposePreprocessor, RecomposeProver};
 
@@ -417,6 +418,19 @@ macro_rules! impl_table_prover_batch_instances_from_base {
             packing: &TablePacking,
             traces: &p3_circuit::tables::Traces<
                 p3_field::extension::BinomialExtensionField<p3_batch_stark::Val<SC>, 4>,
+            >,
+        ) -> Option<BatchTableInstance<SC>> {
+            let t: &p3_circuit::tables::Traces<p3_batch_stark::Val<SC>> =
+                unsafe { transmute_traces(traces) };
+            self.$base::<SC>(config, packing, t)
+        }
+
+        fn batch_instance_binomial_d5(
+            &self,
+            config: &SC,
+            packing: &TablePacking,
+            traces: &p3_circuit::tables::Traces<
+                p3_field::extension::BinomialExtensionField<p3_batch_stark::Val<SC>, 5>,
             >,
         ) -> Option<BatchTableInstance<SC>> {
             let t: &p3_circuit::tables::Traces<p3_batch_stark::Val<SC>> =
@@ -894,7 +908,7 @@ where
         }
     }
 
-    fn periodic_columns(&self) -> Vec<Vec<Val<SC>>> {
+    fn periodic_columns(&self) -> Cow<'_, [Vec<Val<SC>>]> {
         match self {
             Self::Const(a) => BaseAir::<Val<SC>>::periodic_columns(a),
             Self::Public(a) => BaseAir::<Val<SC>>::periodic_columns(a),
@@ -968,6 +982,7 @@ where
 /// reconstructs, instead of trusting the proof-supplied `common.lookups`.
 pub fn lookups_for_circuit_table_air<SC, const D: usize>(
     air: &CircuitTableAir<SC, D>,
+    trace_len: usize,
     is_zk: usize,
 ) -> Lookups<Val<SC>>
 where
@@ -986,6 +1001,7 @@ where
             let log_chunks = get_log_num_quotient_chunks::<Val<SC>, SC::Challenge, _, LogUpGadget>(
                 $a,
                 AirLayout::from_air($a),
+                trace_len,
                 &unpacked,
                 is_zk,
                 &gadget,
@@ -1494,11 +1510,19 @@ where
                     dynamic_instances.push(instance);
                 }
             }
-        } else if D == 5 {
+        } else if D == 5 && EF::alu_is_quintic_trinomial() {
             type EF5<F> = p3_field::extension::QuinticTrinomialExtensionField<F>;
             let t: &Traces<EF5<Val<SC>>> = unsafe { transmute_traces(traces) };
             for p in &self.non_primitive_provers {
                 if let Some(instance) = p.batch_instance_d5(&self.config, packing, t) {
+                    dynamic_instances.push(instance);
+                }
+            }
+        } else if D == 5 {
+            type EF5<F> = BinomialExtensionField<F, 5>;
+            let t: &Traces<EF5<Val<SC>>> = unsafe { transmute_traces(traces) };
+            for p in &self.non_primitive_provers {
+                if let Some(instance) = p.batch_instance_binomial_d5(&self.config, packing, t) {
                     dynamic_instances.push(instance);
                 }
             }
@@ -1662,7 +1686,11 @@ where
                 let debug_instance_lookups: Vec<Lookups<Val<SC>>> = instances
                     .iter()
                     .map(|inst| {
-                        lookups_for_circuit_table_air::<SC, D>(inst.air, self.config.is_zk())
+                        lookups_for_circuit_table_air::<SC, D>(
+                            inst.air,
+                            inst.trace.height(),
+                            self.config.is_zk(),
+                        )
                     })
                     .collect();
                 let debug_instances: Vec<LookupDebugInstance<'_, Val<SC>>> = instances
@@ -1797,10 +1825,33 @@ where
         // Derive lookups from the rebuilt AIRs so the layout always reflects the effective
         // lane counts stored in `proof.table_packing`. The serialized `stark_common` only
         // carries the preprocessed binding, not the lookup contexts.
+        let is_zk = self.config.is_zk();
+        if airs.len() != proof.proof.degree_bits.len() {
+            return Err(BatchStarkProverError::Verify(format!(
+                "AIR count {} does not match degree-bit count {}",
+                airs.len(),
+                proof.proof.degree_bits.len()
+            )));
+        }
         let lookups: Vec<Lookups<Val<SC>>> = airs
             .iter()
-            .map(|a| lookups_for_circuit_table_air::<SC, D>(a, self.config.is_zk()))
-            .collect();
+            .zip(&proof.proof.degree_bits)
+            .map(|(air, &ext_db)| {
+                let base_db = ext_db.checked_sub(is_zk).ok_or_else(|| {
+                    BatchStarkProverError::Verify(format!(
+                        "extended degree bits {ext_db} are smaller than hiding offset {is_zk}"
+                    ))
+                })?;
+                let trace_len = 1usize.checked_shl(base_db as u32).ok_or_else(|| {
+                    BatchStarkProverError::Verify(format!(
+                        "base degree bits {base_db} exceed the platform limit"
+                    ))
+                })?;
+                Ok(lookups_for_circuit_table_air::<SC, D>(
+                    air, trace_len, is_zk,
+                ))
+            })
+            .collect::<Result<_, BatchStarkProverError>>()?;
         let effective_common = CommonData::new(
             common.preprocessed.as_ref().map(|g| GlobalPreprocessed {
                 commitment: g.commitment.clone(),
@@ -1873,6 +1924,22 @@ where
         Algebra<SymbolicExpression<Val<SC>>> + Algebra<SC::Challenge>,
 {
     vec![Box::new(Poseidon2Prover::new(
+        config,
+        ConstraintProfile::Standard,
+    ))]
+}
+
+/// Create Poseidon2 table provers for a binomial `D = 5` circuit trace.
+pub fn poseidon2_table_provers_binomial_d5<SC>(
+    config: Poseidon2Config,
+) -> Vec<Box<dyn TableProver<SC>>>
+where
+    SC: StarkGenericConfig + 'static + Send + Sync,
+    Val<SC>: StarkField + BinomiallyExtendable<5>,
+    SymbolicExpressionExt<Val<SC>, SC::Challenge>:
+        Algebra<SymbolicExpression<Val<SC>>> + Algebra<SC::Challenge>,
+{
+    vec![Box::new(Poseidon2ProverBinomialD5::new(
         config,
         ConstraintProfile::Standard,
     ))]

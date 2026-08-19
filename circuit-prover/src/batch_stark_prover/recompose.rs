@@ -259,6 +259,11 @@ impl NpoPreprocessor<Goldilocks> for RecomposePreprocessor {
         {
             return recompose_preprocess_impl::<F, _, 2>(prep, split);
         }
+        if let Some(prep) =
+            preprocessed.downcast_mut::<PreprocessedColumns<BinomialExtensionField<F, 5>, 5>>()
+        {
+            return recompose_preprocess_impl::<F, _, 5>(prep, split);
+        }
         if let Some(prep) = preprocessed.downcast_mut::<PreprocessedColumns<F, 1>>() {
             return recompose_preprocess_impl::<F, _, 1>(prep, split);
         }

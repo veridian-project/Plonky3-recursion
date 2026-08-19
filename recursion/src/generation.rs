@@ -165,6 +165,19 @@ where
     let mut log_quotient_degrees = Vec::with_capacity(n_instances);
     let mut quotient_degrees = Vec::with_capacity(n_instances);
     for (i, air) in airs.iter().enumerate() {
+        let is_zk = config.is_zk();
+        let base_db =
+            degree_bits[i]
+                .checked_sub(is_zk)
+                .ok_or(GenerationError::InvalidProofShape(
+                    "extended degree smaller than zk adjustment",
+                ))?;
+        let trace_len =
+            1usize
+                .checked_shl(base_db as u32)
+                .ok_or(GenerationError::InvalidProofShape(
+                    "base degree bits exceed the platform limit",
+                ))?;
         let pre_w = common_data
             .preprocessed
             .as_ref()
@@ -181,6 +194,7 @@ where
         let log_qd = get_batch_log_num_quotient_chunks(
             air,
             batch_layout,
+            trace_len,
             &all_lookups[i],
             config.is_zk(),
             lookup_gadget,

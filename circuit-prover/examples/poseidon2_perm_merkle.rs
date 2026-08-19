@@ -180,6 +180,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             inputs: inputs_row0.iter().map(|&x| Some(x)).collect(),
             out_ctl: vec![false, false],
             return_all_outputs: false,
+            absorb_len: 0,
             mmcs_index_sum: None,
         })?;
 
@@ -199,6 +200,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             inputs: sibling1_inputs,
             out_ctl: vec![false, false],
             return_all_outputs: false,
+            absorb_len: 0,
             mmcs_index_sum: None,
         })?;
 
@@ -214,6 +216,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             inputs: sibling2_inputs,
             out_ctl: vec![true, true],
             return_all_outputs: false,
+            absorb_len: 0,
             mmcs_index_sum: Some(mmcs_idx_sum_expr),
         })?;
     let row2_out0 = row2_outputs[0].ok_or("missing row2 out0")?;

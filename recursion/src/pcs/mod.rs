@@ -8,8 +8,8 @@ pub use fri::{
     BatchOpeningTargets, CommitPhaseProofStepTargets, FriProofTargets, FriVerifierParams,
     HashProofTargets, HidingFriProofTargets, HidingHashProofTargets, HidingOpenedValuesTargets,
     InputProofTargets, MerkleCapTargets, MmcsProofTargets, QueryProofTargets, RecExtensionValMmcs,
-    RecExtensionValMmcsArity4, RecValHidingMmcs, RecValMmcs, RecValMmcsArity4,
-    TwoAdicFriProofTargets, Witness, verify_fri_circuit,
+    RecExtensionValMmcsArity4, RecValHidingMmcs, RecValHidingScalarMmcs, RecValMmcs,
+    RecValMmcsArity4, TwoAdicFriProofTargets, Witness, verify_fri_circuit,
 };
 pub use mmcs::{
     convert_merkle_proof_to_siblings, set_fri_mmcs_private_data, set_fri_mmcs_private_data_arity4,

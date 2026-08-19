@@ -87,6 +87,7 @@ pub trait RecursiveAir<F: Field, EF: ExtensionField<F>, LG: LookupProtocol> {
     fn get_log_num_quotient_chunks(
         &self,
         preprocessed_width: usize,
+        trace_len: usize,
         contexts: &[Lookup<F>],
         is_zk: usize,
         lookup_gadget: &LG,
@@ -123,7 +124,7 @@ where
     }
 
     fn periodic_columns(&self) -> Vec<Vec<F>> {
-        p3_air::BaseAir::<F>::periodic_columns(self)
+        p3_air::BaseAir::<F>::periodic_columns(self).into_owned()
     }
 
     fn eval_folded_circuit(
@@ -188,6 +189,7 @@ where
     fn get_log_num_quotient_chunks(
         &self,
         preprocessed_width: usize,
+        trace_len: usize,
         contexts: &[Lookup<F>],
         is_zk: usize,
         lookup_gadget: &LG,
@@ -205,7 +207,7 @@ where
             num_periodic_columns: p3_air::BaseAir::<F>::num_periodic_columns(self),
             ..Default::default()
         };
-        get_log_num_quotient_chunks(self, layout, contexts, is_zk, lookup_gadget)
+        get_log_num_quotient_chunks(self, layout, trace_len, contexts, is_zk, lookup_gadget)
     }
 
     fn declares_interactions(&self, preprocessed_width: usize) -> bool {

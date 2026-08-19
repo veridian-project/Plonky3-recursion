@@ -31,6 +31,7 @@ pub use poseidon1_perm::{
 pub use poseidon2_perm::{
     // Preset configurations
     BabyBearD1Width16,
+    GoldilocksD1Width12,
     GoldilocksD2Width8,
     KoalaBearD1Width16,
     // Prover/AIR (trace access)

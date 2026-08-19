@@ -286,6 +286,34 @@ where
         self.register_npo(plugin);
     }
 
+    /// Enables a D=1, width-12 Poseidon2 permutation whose base-field words
+    /// have already been embedded in the circuit field by the caller.
+    ///
+    /// Quintic recursive verifiers use this shape for Veridian's Goldilocks
+    /// challenger and binary Merkle compression. `perm` must preserve the
+    /// embedding (only the constant basis coefficient is populated).
+    pub fn enable_poseidon2_perm_base_width_12<Config, P>(
+        &mut self,
+        trace_generator: TraceGeneratorFn<F>,
+        perm: P,
+    ) where
+        Config: Poseidon2Params,
+        F: Field,
+        P: Permutation<[F; 12]> + Clone + Send + Sync + 'static,
+    {
+        assert!(
+            Config::D == 1,
+            "enable_poseidon2_perm_base_width_12 only supports extension degree D=1"
+        );
+        assert!(
+            Config::WIDTH == 12,
+            "enable_poseidon2_perm_base_width_12 requires WIDTH=12"
+        );
+        let exec = base_perm_exec::<F, P, 12>(perm);
+        let plugin = Poseidon2CircuitPlugin::new(Config::CONFIG, exec, trace_generator);
+        self.register_npo(plugin);
+    }
+
     /// Enables the Poseidon2 permutation operation for base field challenges (D=1) on the
     /// width-32 arity-4 compression shape.
     ///
@@ -1575,6 +1603,7 @@ where
             inputs: inputs.iter().map(|&x| Some(x)).collect(),
             out_ctl: vec![true; config.rate_ext()],
             return_all_outputs: true,
+            absorb_len: 0,
             mmcs_index_sum: None,
         })?;
 
@@ -1654,6 +1683,7 @@ where
             inputs: inputs.iter().map(|&x| Some(x)).collect(),
             out_ctl: vec![true; config.rate_ext()],
             return_all_outputs: true,
+            absorb_len: 0,
             mmcs_index_sum: None,
         })?;
 
@@ -2229,6 +2259,7 @@ mod tests {
                 inputs: vec![Some(z), Some(z), Some(z), Some(z)],
                 out_ctl: vec![true, true],
                 return_all_outputs: false,
+                absorb_len: 0,
                 mmcs_index_sum: None,
             })
             .unwrap();

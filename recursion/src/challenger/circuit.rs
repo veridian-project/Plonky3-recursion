@@ -111,11 +111,11 @@ impl<const WIDTH: usize, const RATE: usize, C: ChallengerPermConfig>
             self.state[i] = val;
         }
 
-        // The compact-D1 (base) path feeds capacity as `None` and binds the length tag inside the
-        // AIR via `absorb_len`; the extension-field path feeds the full state, so it must apply the
-        // tag to the tracked capacity element here.
+        // D1 paths feed capacity as `None` and bind the length tag inside the compact AIR via
+        // `absorb_len`. Extension-field paths track capacity explicitly and apply the tag here.
         let is_base =
             p2_config.map_or_else(|| p1_config.is_some_and(|c| c.d() == 1), |c| c.d() == 1);
+        let uses_compact_d1 = is_base;
 
         // 2. Prefix-free padding (matches native `DuplexChallenger` 0.6): on an absorb
         // (`num_absorbed > 0`) zero the rate slots the inputs did not overwrite and bind the
@@ -126,7 +126,7 @@ impl<const WIDTH: usize, const RATE: usize, C: ChallengerPermConfig>
             for slot in self.state.iter_mut().take(RATE).skip(num_absorbed) {
                 *slot = zero;
             }
-            if !is_base {
+            if !uses_compact_d1 {
                 let length_tag = circuit.define_const(EF::from_u8(num_absorbed as u8));
                 self.state[RATE] = circuit.add(self.state[RATE], length_tag);
             }
@@ -136,7 +136,11 @@ impl<const WIDTH: usize, const RATE: usize, C: ChallengerPermConfig>
         // (or other) challenge field can still use a base width-16 permutation.
         if let Some(cfg) = p2_config {
             if cfg.d() == 1 {
-                self.duplexing_base(circuit, cfg, num_absorbed);
+                if WIDTH == 16 {
+                    self.duplexing_base(circuit, cfg, num_absorbed);
+                } else {
+                    self.duplexing_base_full(circuit, cfg, num_absorbed);
+                }
             } else {
                 self.duplexing_ext::<BF, EF>(circuit, cfg);
             }
@@ -187,6 +191,45 @@ impl<const WIDTH: usize, const RATE: usize, C: ChallengerPermConfig>
             .expect("poseidon2 base permutation should succeed");
 
         self.state = outputs.to_vec();
+    }
+
+    /// D=1 challenger path for widths other than the compact width-16 layout.
+    ///
+    /// The rate is CTL-exposed while capacity remains inside the Poseidon chain. This is the
+    /// generic-width counterpart of the established width-16 compact D1 path.
+    fn duplexing_base_full<EF>(
+        &mut self,
+        circuit: &mut CircuitBuilder<EF>,
+        poseidon2_config: Poseidon2Config,
+        absorb_len: usize,
+    ) where
+        EF: p3_field::Field,
+    {
+        debug_assert_eq!(poseidon2_config.width(), WIDTH);
+        debug_assert_eq!(poseidon2_config.rate(), RATE);
+        let new_start = !self.duplexed_once;
+        self.duplexed_once = true;
+        let inputs = (0..WIDTH)
+            .map(|i| (i < RATE).then_some(self.state[i]))
+            .collect();
+        let (_, outputs) = circuit
+            .add_poseidon2_perm(&p3_circuit::ops::Poseidon2PermCall {
+                config: poseidon2_config,
+                new_start,
+                merkle_path: false,
+                mmcs_bit: None,
+                mmcs_bit2: None,
+                inputs,
+                out_ctl: vec![true; RATE],
+                return_all_outputs: false,
+                absorb_len,
+                mmcs_index_sum: None,
+            })
+            .expect("chained Poseidon2 base permutation should succeed");
+
+        for (slot, output) in self.state.iter_mut().take(RATE).zip(outputs) {
+            *slot = output.expect("all challenger rate outputs must be returned");
+        }
     }
 
     fn duplexing_ext<BF, EF>(

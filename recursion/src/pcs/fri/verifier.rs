@@ -1108,6 +1108,15 @@ where
         heights
     };
 
+    if let Some(&input_height) = unique_heights_desc.first() {
+        if input_height > log_global_max_height {
+            return Err(VerificationError::InvalidProofShape(format!(
+                "input matrix log height {input_height} exceeds global FRI log height \
+                 {log_global_max_height}"
+            )));
+        }
+    }
+
     let eval_points = if unique_heights_desc.is_empty() {
         BTreeMap::new()
     } else {

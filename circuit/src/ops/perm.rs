@@ -147,6 +147,7 @@ impl<F: Field> CircuitBuilder<F> {
                 inputs: call.inputs.clone(),
                 out_ctl: call.out_ctl.clone(),
                 return_all_outputs: call.return_all_outputs,
+                absorb_len: 0,
                 mmcs_index_sum: call.mmcs_index_sum,
             }),
             PermConfig::Poseidon2(config) => self.add_poseidon2_perm(&Poseidon2PermCall {
@@ -158,6 +159,7 @@ impl<F: Field> CircuitBuilder<F> {
                 inputs: call.inputs.clone(),
                 out_ctl: call.out_ctl.clone(),
                 return_all_outputs: call.return_all_outputs,
+                absorb_len: 0,
                 mmcs_index_sum: call.mmcs_index_sum,
             }),
         }

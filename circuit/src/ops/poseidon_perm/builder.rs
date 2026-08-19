@@ -51,9 +51,13 @@ impl<F: Field> CircuitBuilder<F> {
             op_type,
             input_exprs,
             output_labels,
-            // Extension-field perm rows carry no sponge length tag (the ext-field challenger
-            // applies prefix-free padding at the challenger level, not in the AIR).
-            Some(V::perm_op_params::<F>(call.new_start, call.merkle_path, 0)),
+            // Extension-field callers leave `absorb_len` at zero and apply prefix-free padding
+            // at challenger level. Compact D=1 callers use it to tag chained capacity in-AIR.
+            Some(V::perm_op_params::<F>(
+                call.new_start,
+                call.merkle_path,
+                call.absorb_len,
+            )),
             tag,
         );
         Ok((op_id, outputs))

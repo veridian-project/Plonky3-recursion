@@ -1,3 +1,4 @@
+use alloc::borrow::Cow;
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -91,7 +92,7 @@ where
         <dyn CloneableBatchAir<SC> as BaseAir<Val<SC>>>::num_periodic_columns(self.air())
     }
 
-    fn periodic_columns(&self) -> Vec<Vec<Val<SC>>> {
+    fn periodic_columns(&self) -> Cow<'_, [Vec<Val<SC>>]> {
         <dyn CloneableBatchAir<SC> as BaseAir<Val<SC>>>::periodic_columns(self.air())
     }
 }
@@ -367,6 +368,16 @@ where
         packing: &TablePacking,
         traces: &Traces<BinomialExtensionField<Val<SC>, 4>>,
     ) -> Option<BatchTableInstance<SC>>;
+
+    /// Produce a batched table instance for degree-5 binomial extension traces.
+    fn batch_instance_binomial_d5(
+        &self,
+        _config: &SC,
+        _packing: &TablePacking,
+        _traces: &Traces<BinomialExtensionField<Val<SC>, 5>>,
+    ) -> Option<BatchTableInstance<SC>> {
+        None
+    }
 
     /// Produce a batched table instance for degree-6 extension traces.
     fn batch_instance_d6(

@@ -143,6 +143,21 @@ impl Poseidon2Config {
         partial_rounds: 22,
     };
 
+    /// Goldilocks with base-field challenges (`D=1`), width 12.
+    ///
+    /// This is the challenger/MMCS shape used by Veridian's quintic-extension
+    /// proofs. The recursive circuit itself still uses a degree-5 challenge
+    /// field; `D=1` here describes the Poseidon2 permutation table.
+    pub const GOLDILOCKS_D1_W12: Self = Self {
+        field_id: Poseidon2FieldId::Goldilocks,
+        d: 1,
+        width: 12,
+        sbox_degree: 7,
+        sbox_registers: 1,
+        half_full_rounds: 4,
+        partial_rounds: 22,
+    };
+
     /// KoalaBear with base-field (`D=1`) challenges and a 32-element state.
     ///
     /// Arity-4 compression shape: `4 · capacity_ext == width_ext` with
@@ -428,6 +443,7 @@ impl Poseidon2Config {
                 _ => panic!("unknown KoalaBear Poseidon2 config"),
             },
             Poseidon2FieldId::Goldilocks => match (self.d, self.width) {
+                (1, 12) => "goldilocks_d1_w12",
                 (2, 8) => "goldilocks_d2_w8",
                 (2, 16) => "goldilocks_d2_w16",
                 _ => panic!("unknown Goldilocks Poseidon2 config"),
@@ -447,6 +463,7 @@ impl Poseidon2Config {
             "koala_bear_d4_w24" => Some(Self::KOALA_BEAR_D4_W24),
             "koala_bear_d1_w32" => Some(Self::KOALA_BEAR_D1_W32),
             "koala_bear_d4_w32" => Some(Self::KOALA_BEAR_D4_W32),
+            "goldilocks_d1_w12" => Some(Self::GOLDILOCKS_D1_W12),
             "goldilocks_d2_w8" => Some(Self::GOLDILOCKS_D2_W8),
             "goldilocks_d2_w16" => Some(Self::GOLDILOCKS_D2_W16),
             _ => None,
@@ -691,6 +708,7 @@ mod tests {
             Poseidon2Config::KOALA_BEAR_D4_W24,
             Poseidon2Config::KOALA_BEAR_D1_W32,
             Poseidon2Config::KOALA_BEAR_D4_W32,
+            Poseidon2Config::GOLDILOCKS_D1_W12,
             Poseidon2Config::GOLDILOCKS_D2_W8,
             Poseidon2Config::GOLDILOCKS_D2_W16,
         ];

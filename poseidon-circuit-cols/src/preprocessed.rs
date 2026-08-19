@@ -99,7 +99,7 @@ pub struct PoseidonPrepOutputLimb<T> {
 /// (`RATE_EXT`). Each [`PoseidonPrepOutputLimb`] occupies two columns.
 /// The row ends with four single-column flags.
 ///
-/// For D=1 width-16 / rate-8 Poseidon, use [`poseidon_preprocessed_row_width_for_air`] instead.
+/// For compact D=1 arity-2 Poseidon, use [`poseidon_preprocessed_row_width_for_air`] instead.
 #[inline]
 pub const fn poseidon_preprocessed_row_width(input_limbs: usize, output_limbs: usize) -> usize {
     input_limbs * size_of::<PoseidonPrepInputLimb<u8>>()
@@ -109,14 +109,15 @@ pub const fn poseidon_preprocessed_row_width(input_limbs: usize, output_limbs: u
 
 /// `true` when the Poseidon AIR uses the compact D=1 preprocessed layout.
 ///
-/// Compact D=1 layout applies to the width-16 / rate-8 base-field instance.
+/// Compact D=1 layout applies to arity-2 base-field instances whose capacity equals their rate.
+/// This includes both the established W16/R8 shape and Goldilocks W12/R6.
 #[inline]
 pub const fn poseidon_uses_compact_d1_preprocessed(
     poseidon_d: usize,
     width_ext: usize,
     rate_ext: usize,
 ) -> bool {
-    poseidon_d == 1 && width_ext == 16 && rate_ext == 8
+    poseidon_d == 1 && width_ext == 2 * rate_ext
 }
 
 /// Scalar columns before input indices in the compact D=1 layout: `rate_ext` per-limb `in_ctl`,
@@ -293,13 +294,18 @@ mod tests {
     }
 
     #[test]
-    fn test_uses_compact_d1_false_wrong_width() {
-        assert!(!poseidon_uses_compact_d1_preprocessed(1, 8, 4));
+    fn test_uses_compact_d1_width_8_rate_4() {
+        assert!(poseidon_uses_compact_d1_preprocessed(1, 8, 4));
     }
 
     #[test]
     fn test_uses_compact_d1_false_wrong_rate() {
         assert!(!poseidon_uses_compact_d1_preprocessed(1, 16, 4));
+    }
+
+    #[test]
+    fn test_uses_compact_d1_width_12_rate_6() {
+        assert!(poseidon_uses_compact_d1_preprocessed(1, 12, 6));
     }
 
     #[test]

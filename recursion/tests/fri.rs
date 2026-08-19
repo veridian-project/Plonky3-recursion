@@ -940,3 +940,32 @@ fn test_fri_verifier_rejects_zero_query_proof() {
         "expected InvalidProofShape, got {err:?}"
     );
 }
+
+#[test]
+fn test_fri_verifier_rejects_input_height_above_global_height_without_panicking() {
+    let setup = generate_setup(
+        0,
+        vec![vec![0u8, 5, 8, 8, 10], vec![8u8, 11], vec![4u8, 5, 8]],
+    );
+    let mut result = produce_inputs_multi(
+        &setup.pcs,
+        &setup.perm,
+        setup.log_blowup,
+        setup.log_final_poly_len,
+        (setup.commit_pow_bits, setup.query_pow_bits),
+        &setup.group_sizes,
+        0,
+    );
+
+    let invalid_domain_log = result.log_max_height + 1 - setup.log_blowup;
+    result.commitments_with_points[0].1[0].0 =
+        TwoAdicMultiplicativeCoset::new(F::GENERATOR, invalid_domain_log)
+            .expect("test height must remain within the field two-adicity");
+
+    let err = try_build_fri_verifier(&result, setup.log_blowup)
+        .expect_err("input height above the global FRI height must be rejected");
+    assert!(
+        matches!(err, VerificationError::InvalidProofShape(_)),
+        "expected InvalidProofShape, got {err:?}"
+    );
+}

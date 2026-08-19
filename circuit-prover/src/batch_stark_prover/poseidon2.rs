@@ -56,6 +56,8 @@ pub enum Poseidon2AirWrapperInner {
     KoalaBearD1Width32Bus1(Box<Poseidon2CircuitAirKoalaBearD1Width32>),
     KoalaBearD1Width32Bus5(Box<Poseidon2CircuitAirKoalaBearD1Width32WitnessBus5>),
     KoalaBearD4Width32(Box<Poseidon2CircuitAirKoalaBearD4Width32>),
+    GoldilocksD1Width12Bus1(Box<Poseidon2CircuitAirGoldilocksD1Width12>),
+    GoldilocksD1Width12Bus5(Box<Poseidon2CircuitAirGoldilocksD1Width12WitnessBus5>),
     GoldilocksD2Width8(Box<Poseidon2CircuitAirGoldilocksD2Width8>),
     GoldilocksD2Width16(Box<Poseidon2CircuitAirGoldilocksD2Width16>),
 }
@@ -75,6 +77,8 @@ impl Poseidon2AirWrapperInner {
             Self::KoalaBearD1Width32Bus1(air) => air.width(),
             Self::KoalaBearD1Width32Bus5(air) => air.width(),
             Self::KoalaBearD4Width32(air) => air.width(),
+            Self::GoldilocksD1Width12Bus1(air) => air.width(),
+            Self::GoldilocksD1Width12Bus5(air) => air.width(),
             Self::GoldilocksD2Width8(air) => air.width(),
             Self::GoldilocksD2Width16(air) => air.width(),
         }
@@ -106,6 +110,12 @@ impl Poseidon2AirWrapperInner {
                 BaseAir::<KoalaBear>::preprocessed_width(air.as_ref())
             }
             Self::KoalaBearD4Width32(air) => BaseAir::<KoalaBear>::preprocessed_width(air.as_ref()),
+            Self::GoldilocksD1Width12Bus1(air) => {
+                BaseAir::<Goldilocks>::preprocessed_width(air.as_ref())
+            }
+            Self::GoldilocksD1Width12Bus5(air) => {
+                BaseAir::<Goldilocks>::preprocessed_width(air.as_ref())
+            }
             Self::GoldilocksD2Width8(air) => {
                 BaseAir::<Goldilocks>::preprocessed_width(air.as_ref())
             }
@@ -131,6 +141,8 @@ impl Clone for Poseidon2AirWrapperInner {
             Self::KoalaBearD1Width32Bus1(air) => Self::KoalaBearD1Width32Bus1(air.clone()),
             Self::KoalaBearD1Width32Bus5(air) => Self::KoalaBearD1Width32Bus5(air.clone()),
             Self::KoalaBearD4Width32(air) => Self::KoalaBearD4Width32(air.clone()),
+            Self::GoldilocksD1Width12Bus1(air) => Self::GoldilocksD1Width12Bus1(air.clone()),
+            Self::GoldilocksD1Width12Bus5(air) => Self::GoldilocksD1Width12Bus5(air.clone()),
             Self::GoldilocksD2Width8(air) => Self::GoldilocksD2Width8(air.clone()),
             Self::GoldilocksD2Width16(air) => Self::GoldilocksD2Width16(air.clone()),
         }
@@ -300,6 +312,24 @@ macro_rules! eval_folder_inner {
                     { <KoalaBearD4Width32 as Poseidon2Params>::D };
                     air.as_ref(), b, l, n, p);
             },
+            Poseidon2AirWrapperInner::GoldilocksD1Width12Bus1(air) => unsafe {
+                let b: &mut $gl_ty = transmute::<_, &mut $gl_ty>($builder);
+                let l: &[<$gl_ty as AirBuilder>::Var] = transmute($local);
+                let n: &[<$gl_ty as AirBuilder>::Var] = transmute($next);
+                let p: &[<$gl_ty as AirBuilder>::Var] = transmute($prep);
+                call_eval_variant!(GoldilocksD1Width12, GoldilocksConfig, Goldilocks,
+                    GenericPoseidon2LinearLayersGoldilocks, $gl_ty, 1;
+                    air.as_ref(), b, l, n, p);
+            },
+            Poseidon2AirWrapperInner::GoldilocksD1Width12Bus5(air) => unsafe {
+                let b: &mut $gl_ty = transmute::<_, &mut $gl_ty>($builder);
+                let l: &[<$gl_ty as AirBuilder>::Var] = transmute($local);
+                let n: &[<$gl_ty as AirBuilder>::Var] = transmute($next);
+                let p: &[<$gl_ty as AirBuilder>::Var] = transmute($prep);
+                call_eval_variant!(GoldilocksD1Width12, GoldilocksConfig, Goldilocks,
+                    GenericPoseidon2LinearLayersGoldilocks, $gl_ty, 5;
+                    air.as_ref(), b, l, n, p);
+            },
             Poseidon2AirWrapperInner::GoldilocksD2Width8(air) => unsafe {
                 let b: &mut $gl_ty = transmute::<_, &mut $gl_ty>($builder);
                 let l: &[<$gl_ty as AirBuilder>::Var] = transmute($local);
@@ -423,6 +453,14 @@ macro_rules! eval_symbolic_inner {
                     Air::eval(air.as_ref(), b);
                 }
             }
+            Poseidon2AirWrapperInner::GoldilocksD1Width12Bus1(air) => unsafe {
+                let b: &mut InteractionSymbolicBuilder<Goldilocks> = core::mem::transmute($builder);
+                Air::eval(air.as_ref(), b);
+            },
+            Poseidon2AirWrapperInner::GoldilocksD1Width12Bus5(air) => unsafe {
+                let b: &mut InteractionSymbolicBuilder<Goldilocks> = core::mem::transmute($builder);
+                Air::eval(air.as_ref(), b);
+            },
             Poseidon2AirWrapperInner::GoldilocksD2Width8(air) => unsafe {
                 let b: &mut InteractionSymbolicBuilder<
                     Goldilocks,
@@ -510,6 +548,16 @@ macro_rules! eval_verifier_inner {
                     { <KoalaBearD4Width32 as Poseidon2Params>::D };
                     air.as_ref(), $builder, $local, $next, $prep);
             },
+            Poseidon2AirWrapperInner::GoldilocksD1Width12Bus1(air) => unsafe {
+                call_eval_variant!(GoldilocksD1Width12, GoldilocksConfig, Goldilocks,
+                    GenericPoseidon2LinearLayersGoldilocks, $ab, 1;
+                    air.as_ref(), $builder, $local, $next, $prep);
+            },
+            Poseidon2AirWrapperInner::GoldilocksD1Width12Bus5(air) => unsafe {
+                call_eval_variant!(GoldilocksD1Width12, GoldilocksConfig, Goldilocks,
+                    GenericPoseidon2LinearLayersGoldilocks, $ab, 5;
+                    air.as_ref(), $builder, $local, $next, $prep);
+            },
             Poseidon2AirWrapperInner::GoldilocksD2Width8(air) => unsafe {
                 call_eval_variant!(GoldilocksD2Width8, GoldilocksConfig, Goldilocks,
                     GenericPoseidon2LinearLayersGoldilocks, $ab,
@@ -588,6 +636,18 @@ macro_rules! preprocessed_trace_inner {
                 assert_eq!(Val::<$SC>::from_u64(KOALA_BEAR_MODULUS), Val::<$SC>::ZERO);
                 let p = BaseAir::<KoalaBear>::preprocessed_trace(air.as_ref())?;
                 Some(unsafe { transmute::<RowMajorMatrix<KoalaBear>, RowMajorMatrix<Val<$SC>>>(p) })
+            }
+            Poseidon2AirWrapperInner::GoldilocksD1Width12Bus1(air) => {
+                let p = BaseAir::<Goldilocks>::preprocessed_trace(air.as_ref())?;
+                Some(unsafe {
+                    transmute::<RowMajorMatrix<Goldilocks>, RowMajorMatrix<Val<$SC>>>(p)
+                })
+            }
+            Poseidon2AirWrapperInner::GoldilocksD1Width12Bus5(air) => {
+                let p = BaseAir::<Goldilocks>::preprocessed_trace(air.as_ref())?;
+                Some(unsafe {
+                    transmute::<RowMajorMatrix<Goldilocks>, RowMajorMatrix<Val<$SC>>>(p)
+                })
             }
             Poseidon2AirWrapperInner::GoldilocksD2Width8(air) => {
                 let p = BaseAir::<Goldilocks>::preprocessed_trace(air.as_ref())?;
@@ -873,6 +933,11 @@ impl Poseidon2Prover {
             Poseidon2Config::KOALA_BEAR_D4_W32 => Poseidon2AirWrapperInner::KoalaBearD4Width32(
                 Box::new(KoalaBearD4Width32::default_air()),
             ),
+            Poseidon2Config::GOLDILOCKS_D1_W12 => {
+                Poseidon2AirWrapperInner::GoldilocksD1Width12Bus1(Box::new(
+                    GoldilocksD1Width12::default_air(),
+                ))
+            }
             Poseidon2Config::GOLDILOCKS_D2_W8 => Poseidon2AirWrapperInner::GoldilocksD2Width8(
                 Box::new(goldilocks_d2_width8_default_air()),
             ),
@@ -991,6 +1056,20 @@ impl Poseidon2Prover {
                     ),
                 ))
             }
+            Poseidon2Config::GOLDILOCKS_D1_W12 => {
+                let prep = unsafe { transmute::<Vec<F>, Vec<Goldilocks>>(preprocessed) };
+                match poseidon_d1_witness_bus_dim(circuit_extension_degree)? {
+                    1 => Poseidon2AirWrapperInner::GoldilocksD1Width12Bus1(Box::new(
+                        GoldilocksD1Width12::default_air_with_preprocessed(prep, min_height),
+                    )),
+                    5 => Poseidon2AirWrapperInner::GoldilocksD1Width12Bus5(Box::new(
+                        GoldilocksD1Width12::default_air_with_preprocessed_witness_bus5(
+                            prep, min_height,
+                        ),
+                    )),
+                    _ => unreachable!(),
+                }
+            }
             Poseidon2Config::GOLDILOCKS_D2_W8 => Poseidon2AirWrapperInner::GoldilocksD2Width8(
                 Box::new(goldilocks_d2_width8_default_air_with_preprocessed(
                     unsafe { transmute::<Vec<F>, Vec<Goldilocks>>(preprocessed) },
@@ -1060,6 +1139,9 @@ impl Poseidon2Prover {
             }
             Poseidon2Config::KOALA_BEAR_D4_W32 => {
                 Poseidon2CircuitAirKoalaBearD4Width32::preprocessed_width()
+            }
+            Poseidon2Config::GOLDILOCKS_D1_W12 => {
+                Poseidon2CircuitAirGoldilocksD1Width12::preprocessed_width()
             }
             Poseidon2Config::GOLDILOCKS_D2_W8 => {
                 Poseidon2CircuitAirGoldilocksD2Width8::preprocessed_width()
@@ -1398,6 +1480,52 @@ impl Poseidon2Prover {
                     matrix,
                 )
             }
+            Poseidon2Config::GOLDILOCKS_D1_W12 => {
+                let constants = goldilocks_d1_width12_round_constants();
+                let wbus = poseidon_d1_witness_bus_dim(witness_ctl_scale)?;
+                let preprocessed = extract_preprocessed_from_operations::<12, 6, Goldilocks, Val<SC>>(
+                    &t.operations,
+                    witness_ctl_scale,
+                    1,
+                );
+                let (inner, matrix_f) = match wbus {
+                    1 => {
+                        let air = GoldilocksD1Width12::default_air_with_preprocessed(
+                            preprocessed,
+                            min_height,
+                        );
+                        let ops: Vec<Poseidon2CircuitRow<Goldilocks>> =
+                            unsafe { transmute(padded_ops) };
+                        let matrix_f = air.generate_trace_rows(&ops, &constants, 0);
+                        (
+                            Poseidon2AirWrapperInner::GoldilocksD1Width12Bus1(Box::new(air)),
+                            matrix_f,
+                        )
+                    }
+                    5 => {
+                        let air = GoldilocksD1Width12::default_air_with_preprocessed_witness_bus5(
+                            preprocessed,
+                            min_height,
+                        );
+                        let ops: Vec<Poseidon2CircuitRow<Goldilocks>> =
+                            unsafe { transmute(padded_ops) };
+                        let matrix_f = air.generate_trace_rows(&ops, &constants, 0);
+                        (
+                            Poseidon2AirWrapperInner::GoldilocksD1Width12Bus5(Box::new(air)),
+                            matrix_f,
+                        )
+                    }
+                    _ => unreachable!(),
+                };
+                let matrix: RowMajorMatrix<Val<SC>> = unsafe { transmute(matrix_f) };
+                (
+                    Poseidon2AirWrapper {
+                        inner,
+                        _phantom: core::marker::PhantomData::<SC>,
+                    },
+                    matrix,
+                )
+            }
             Poseidon2Config::GOLDILOCKS_D2_W8 => {
                 let constants = goldilocks_d2_width8_round_constants();
                 let preprocessed = extract_preprocessed_from_operations::<4, 2, Goldilocks, Val<SC>>(
@@ -1661,6 +1789,119 @@ where
     }
 }
 
+/// Poseidon2 table prover for circuits whose trace field is a quintic
+/// binomial extension (not the distinct quintic-trinomial field).
+pub struct Poseidon2ProverBinomialD5(pub(crate) Poseidon2Prover);
+
+impl Poseidon2ProverBinomialD5 {
+    pub const fn new(
+        config: Poseidon2Config,
+        profile: crate::constraint_profile::ConstraintProfile,
+    ) -> Self {
+        Self(Poseidon2Prover::new(config, profile))
+    }
+}
+
+impl<SC> TableProver<SC> for Poseidon2ProverBinomialD5
+where
+    SC: StarkGenericConfig + 'static + Send + Sync,
+    Val<SC>: StarkField + BinomiallyExtendable<5>,
+    SymbolicExpressionExt<Val<SC>, SC::Challenge>:
+        Algebra<SymbolicExpression<Val<SC>>> + Algebra<SC::Challenge>,
+{
+    fn op_type(&self) -> NpoTypeId {
+        self.0.poseidon2_op_type()
+    }
+
+    fn batch_instance_d1(
+        &self,
+        _config: &SC,
+        _packing: &TablePacking,
+        _traces: &Traces<Val<SC>>,
+    ) -> Option<BatchTableInstance<SC>> {
+        None
+    }
+
+    fn batch_instance_d2(
+        &self,
+        _config: &SC,
+        _packing: &TablePacking,
+        _traces: &Traces<BinomialExtensionField<Val<SC>, 2>>,
+    ) -> Option<BatchTableInstance<SC>> {
+        None
+    }
+
+    fn batch_instance_d4(
+        &self,
+        _config: &SC,
+        _packing: &TablePacking,
+        _traces: &Traces<BinomialExtensionField<Val<SC>, 4>>,
+    ) -> Option<BatchTableInstance<SC>> {
+        None
+    }
+
+    fn batch_instance_binomial_d5(
+        &self,
+        config: &SC,
+        packing: &TablePacking,
+        traces: &Traces<BinomialExtensionField<Val<SC>, 5>>,
+    ) -> Option<BatchTableInstance<SC>> {
+        self.0
+            .batch_instance_from_traces::<SC, BinomialExtensionField<Val<SC>, 5>>(
+                config, packing, traces,
+            )
+    }
+
+    fn batch_instance_d6(
+        &self,
+        _config: &SC,
+        _packing: &TablePacking,
+        _traces: &Traces<BinomialExtensionField<Val<SC>, 6>>,
+    ) -> Option<BatchTableInstance<SC>> {
+        None
+    }
+
+    fn batch_instance_d8(
+        &self,
+        _config: &SC,
+        _packing: &TablePacking,
+        _traces: &Traces<BinomialExtensionField<Val<SC>, 8>>,
+    ) -> Option<BatchTableInstance<SC>> {
+        None
+    }
+
+    fn batch_air_from_table_entry(
+        &self,
+        _config: &SC,
+        _degree: usize,
+        circuit_extension_degree: u32,
+        _table_entry: &NonPrimitiveTableEntry<SC>,
+    ) -> Result<DynamicAirEntry<SC>, String> {
+        self.0
+            .wrapper_from_config_with_preprocessed(Vec::new(), 1, circuit_extension_degree)
+            .ok_or_else(|| {
+                format!(
+                    "unsupported witness bus dimension {} for Poseidon2 config {:?}",
+                    circuit_extension_degree, self.0.config
+                )
+            })
+    }
+
+    fn air_with_committed_preprocessed(
+        &self,
+        committed_prep: Vec<Val<SC>>,
+        min_height: usize,
+        _lanes: usize,
+        circuit_extension_degree: u32,
+    ) -> Option<DynamicAirEntry<SC>> {
+        self.0.wrapper_from_config_with_preprocessed(
+            committed_prep,
+            min_height,
+            circuit_extension_degree,
+        )
+    }
+}
+
 /// Shared helper implementing Poseidon2-specific preprocessing on generic preprocessed columns.
 fn poseidon2_preprocess_for_prover<F, ExtF, const D: usize>(
     preprocessed: &mut PreprocessedColumns<ExtF, D>,
@@ -1750,6 +1991,15 @@ impl NpoPreprocessor<Goldilocks> for Poseidon2Preprocessor {
                 2,
             >(prep);
         }
+        if let Some(prep) = preprocessed
+            .downcast_mut::<PreprocessedColumns<BinomialExtensionField<Goldilocks, 5>, 5>>()
+        {
+            return poseidon2_preprocess_for_prover::<
+                Goldilocks,
+                BinomialExtensionField<Goldilocks, 5>,
+                5,
+            >(prep);
+        }
         Ok(NonPrimitivePreprocessedMap::new())
     }
 }
@@ -1781,7 +2031,8 @@ pub(crate) fn poseidon2_config_for_air_builder<const D: usize>(
         5 => match config {
             Poseidon2Config::BABY_BEAR_D1_W16
             | Poseidon2Config::KOALA_BEAR_D1_W16
-            | Poseidon2Config::KOALA_BEAR_D1_W32 => Some(config),
+            | Poseidon2Config::KOALA_BEAR_D1_W32
+            | Poseidon2Config::GOLDILOCKS_D1_W12 => Some(config),
             _ => None,
         },
         _ => None,
@@ -1880,7 +2131,8 @@ where
         let config = match config {
             Poseidon2Config::BABY_BEAR_D1_W16
             | Poseidon2Config::KOALA_BEAR_D1_W16
-            | Poseidon2Config::KOALA_BEAR_D1_W32 => config,
+            | Poseidon2Config::KOALA_BEAR_D1_W32
+            | Poseidon2Config::GOLDILOCKS_D1_W12 => config,
             _ => return None,
         };
         let prover = Poseidon2Prover::new(config, constraint_profile);
@@ -1982,7 +2234,8 @@ where
         let config = match self.config {
             Poseidon2Config::BABY_BEAR_D1_W16
             | Poseidon2Config::KOALA_BEAR_D1_W16
-            | Poseidon2Config::KOALA_BEAR_D1_W32 => self.config,
+            | Poseidon2Config::KOALA_BEAR_D1_W32
+            | Poseidon2Config::GOLDILOCKS_D1_W12 => self.config,
             _ => return None,
         };
         let prover = Poseidon2Prover::new(config, constraint_profile);

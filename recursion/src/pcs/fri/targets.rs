@@ -636,6 +636,27 @@ where
     _phantom: PhantomData<(F, R)>,
 }
 
+/// Recursive target adapter for a scalar `MerkleTreeHidingMmcs<F, F, ...>`.
+///
+/// [`RecValHidingMmcs`] covers the conventional SIMD-packed native MMCS. Some
+/// production configurations intentionally commit scalar field matrices, so
+/// their native MMCS type is distinct even though its commitment and proof
+/// shapes are identical.
+pub struct RecValHidingScalarMmcs<
+    F: Field,
+    const DIGEST_ELEMS: usize,
+    const SALT_ELEMS: usize,
+    H,
+    C,
+    R,
+> where
+    H: CryptographicHasher<F, [F; DIGEST_ELEMS]> + Sync,
+{
+    pub hash: H,
+    pub compress: C,
+    _phantom: PhantomData<(F, R)>,
+}
+
 impl<
     F: Field + Serialize + DeserializeOwned,
     EF: ExtensionField<F>,
@@ -657,6 +678,29 @@ where
     [F; DIGEST_ELEMS]: Serialize + for<'a> Deserialize<'a>,
 {
     type Input = MerkleTreeHidingMmcs<F::Packing, F::Packing, H, C, R, 2, DIGEST_ELEMS, SALT_ELEMS>;
+
+    type Commitment = MerkleCapTargets<F, DIGEST_ELEMS>;
+
+    type Proof = HidingHashProofTargets<F, DIGEST_ELEMS>;
+}
+
+impl<
+    F: Field + Serialize + DeserializeOwned,
+    EF: ExtensionField<F>,
+    const DIGEST_ELEMS: usize,
+    const SALT_ELEMS: usize,
+    H,
+    C,
+    R,
+> RecursiveMmcs<F, EF> for RecValHidingScalarMmcs<F, DIGEST_ELEMS, SALT_ELEMS, H, C, R>
+where
+    H: CryptographicHasher<F, [F; DIGEST_ELEMS]> + Sync,
+    C: PseudoCompressionFunction<[F; DIGEST_ELEMS], 2> + Sync,
+    R: Rng + Clone + Send,
+    StandardUniform: Distribution<F>,
+    [F; DIGEST_ELEMS]: Serialize + for<'a> Deserialize<'a>,
+{
+    type Input = MerkleTreeHidingMmcs<F, F, H, C, R, 2, DIGEST_ELEMS, SALT_ELEMS>;
 
     type Commitment = MerkleCapTargets<F, DIGEST_ELEMS>;
 
