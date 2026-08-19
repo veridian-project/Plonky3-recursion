@@ -3,7 +3,7 @@ use alloc::vec::Vec;
 use core::any::Any;
 
 use hashbrown::HashMap;
-use p3_circuit::ops::{NonPrimitivePreprocessedMap, NpoTypeId, PrimitiveOpType};
+use p3_circuit::ops::{NonPrimitivePreprocessedMap, NpoTypeId, Op, PrimitiveOpType};
 use p3_circuit::{Circuit, CircuitError};
 use p3_field::{Algebra, ExtensionField, Field, PrimeCharacteristicRing, PrimeField64};
 use p3_uni_stark::{StarkGenericConfig, SymbolicExpression, SymbolicExpressionExt, Val};
@@ -360,28 +360,43 @@ where
                 ));
             }
             PrimitiveOpType::Const => {
-                // Const preprocessed per op from circuit.rs: 1 value (D-scaled out_idx).
-                // Convert to [ext_mult, out_idx] pairs using ext_reads.
-                let mut prep_2col: Vec<Val<SC>> = Vec::with_capacity(base_prep[idx].len() * 2);
+                // Const preprocessed per op from circuit.rs contains the D-scaled out_idx.
+                // Bind each static constant into the committed preprocessed trace as
+                // [ext_mult, out_idx, value[0..D]].
+                let mut prep_bound: Vec<Val<SC>> =
+                    Vec::with_capacity(base_prep[idx].len() * (D + 2));
                 let duplicate_outputs = &preprocessed.dup_primitive_outputs[idx];
                 if duplicate_outputs.len() != base_prep[idx].len() {
                     return Err(CircuitError::InvalidPreprocessedValues);
                 }
                 let neg_one = <Val<SC>>::ZERO - <Val<SC>>::ONE;
+                let mut const_values = circuit.ops.iter().filter_map(|op| match op {
+                    Op::Const { val, .. } => Some(val.as_basis_coefficients_slice()),
+                    _ => None,
+                });
                 for (ordinal, &out_idx) in base_prep[idx].iter().enumerate() {
                     let out_wid = out_idx.as_canonical_u64() as usize / D;
                     let n_reads = preprocessed.ext_reads.get(out_wid).copied().unwrap_or(0);
-                    prep_2col.push(if duplicate_outputs[ordinal] {
+                    prep_bound.push(if duplicate_outputs[ordinal] {
                         neg_one
                     } else {
                         <Val<SC>>::from_u32(n_reads)
                     });
-                    prep_2col.push(out_idx);
+                    prep_bound.push(out_idx);
+                    let coefficients = const_values
+                        .next()
+                        .ok_or(CircuitError::InvalidPreprocessedValues)?;
+                    if coefficients.len() != D {
+                        return Err(CircuitError::InvalidPreprocessedValues);
+                    }
+                    prep_bound.extend_from_slice(coefficients);
+                }
+                if const_values.next().is_some() {
+                    return Err(CircuitError::InvalidPreprocessedValues);
                 }
 
-                let height = prep_2col.len() / 2;
-                // Store the converted 2-col format before building the AIR.
-                base_prep[idx] = prep_2col;
+                let height = prep_bound.len() / (D + 2);
+                base_prep[idx] = prep_bound;
                 let const_air = ConstAir::new_with_preprocessed(height, base_prep[idx].clone())
                     .with_min_height(min_height);
                 table_preps.push((
