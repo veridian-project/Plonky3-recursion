@@ -47,6 +47,16 @@ impl Deduplicator {
             result.push(op);
         }
 
+        // A duplicate discovered late in the operation stream can rewrite a
+        // witness referenced by an earlier Const, Public, Hint, or NPO row.
+        // Revisit retained operations after the rewrite map is complete so
+        // every occurrence uses the canonical witness.
+        if !self.rewrite.is_empty() {
+            for op in &mut result {
+                op.apply_witness_rewrite(&self.rewrite);
+            }
+        }
+
         (result, self.rewrite)
     }
 
@@ -192,6 +202,34 @@ mod tests {
         let (deduped, rewrite) = Deduplicator::with_capacity(ops.len()).run(ops.clone());
         assert_eq!(deduped, ops);
         assert!(rewrite.is_empty());
+    }
+
+    #[test]
+    fn late_alu_dedup_rewrites_an_earlier_public_output() {
+        let mut builder = CircuitBuilder::<F>::new();
+        let left_a = builder.public_input();
+        let right_a = builder.public_input();
+        let left_b = builder.public_input();
+        let right_b = builder.public_input();
+        let expected = builder.public_input();
+        builder.connect(left_a, right_a);
+        builder.connect(left_b, right_b);
+        let _canonical = builder.add(left_a, left_b);
+        let duplicate = builder.add(right_a, right_b);
+        builder.connect(expected, duplicate);
+
+        let circuit = builder.build().unwrap();
+        let mut runner = circuit.runner();
+        runner
+            .set_public_inputs(&[
+                F::from_u64(2),
+                F::from_u64(2),
+                F::from_u64(3),
+                F::from_u64(3),
+                F::from_u64(5),
+            ])
+            .unwrap();
+        runner.run().unwrap();
     }
 
     #[test]
