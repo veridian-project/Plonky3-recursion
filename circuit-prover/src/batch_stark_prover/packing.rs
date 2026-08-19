@@ -1,6 +1,6 @@
 use alloc::vec::Vec;
 
-use p3_circuit::ops::NpoTypeId;
+use p3_circuit::ops::{NpoTypeId, PrimitiveOpType};
 use serde::{Deserialize, Serialize};
 
 use crate::ProofMetadataError;
@@ -24,10 +24,22 @@ pub struct TablePacking {
     /// FRI requires: `log_trace_height > log_final_poly_len + log_blowup`
     /// So min_trace_height should be >= `2^(log_final_poly_len + log_blowup + 1)`
     min_trace_height: usize,
+    /// Per-primitive-table minimum trace heights. These are combined with
+    /// `min_trace_height`, allowing a fixed verifier shape without inflating
+    /// every table to the largest table's height.
+    #[serde(default = "default_primitive_min_trace_heights")]
+    primitive_min_trace_heights: [usize; 3],
+    /// Per-NPO minimum trace heights, combined with `min_trace_height`.
+    #[serde(default)]
+    npo_min_trace_heights: Vec<(NpoTypeId, usize)>,
     /// Pack this many consecutive `HornerAcc` ops (same `b` witness) per ALU row on lane 0.
     /// Must be at least 2. Default 2 matches the previous double-step Horner layout.
     #[serde(default = "default_horner_pack_k")]
     horner_packed_steps: usize,
+}
+
+const fn default_primitive_min_trace_heights() -> [usize; 3] {
+    [1; 3]
 }
 
 const fn default_horner_pack_k() -> usize {
@@ -45,6 +57,8 @@ impl TablePacking {
             alu_lanes: alu_lanes.max(1),
             npo_lanes: Vec::new(),
             min_trace_height: 1,
+            primitive_min_trace_heights: default_primitive_min_trace_heights(),
+            npo_min_trace_heights: Vec::new(),
             horner_packed_steps: 2,
         }
     }
@@ -112,6 +126,39 @@ impl TablePacking {
         self
     }
 
+    /// Set a minimum trace height for one primitive table.
+    #[must_use]
+    pub fn with_primitive_min_trace_height(
+        mut self,
+        table: PrimitiveOpType,
+        min_trace_height: usize,
+    ) -> Self {
+        self.primitive_min_trace_heights[table as usize] =
+            min_trace_height.next_power_of_two().max(1);
+        self
+    }
+
+    /// Set a minimum trace height for one non-primitive table.
+    #[must_use]
+    pub fn with_npo_min_trace_height(
+        mut self,
+        op_type: impl Into<NpoTypeId>,
+        min_trace_height: usize,
+    ) -> Self {
+        let op_type = op_type.into();
+        let min_trace_height = min_trace_height.next_power_of_two().max(1);
+        if let Some(entry) = self
+            .npo_min_trace_heights
+            .iter_mut()
+            .find(|(key, _)| *key == op_type)
+        {
+            entry.1 = min_trace_height;
+        } else {
+            self.npo_min_trace_heights.push((op_type, min_trace_height));
+        }
+        self
+    }
+
     /// Update the current [`TablePacking`] with minimum height derived from FRI parameters.
     ///
     /// This automatically calculates the minimum trace height from `log_final_poly_len` and `log_blowup`.
@@ -156,6 +203,22 @@ impl TablePacking {
         self.min_trace_height
     }
 
+    /// Return the effective minimum height for a primitive table.
+    pub fn primitive_min_trace_height(&self, table: PrimitiveOpType) -> usize {
+        self.min_trace_height
+            .max(self.primitive_min_trace_heights[table as usize])
+    }
+
+    /// Return the effective minimum height for a non-primitive table.
+    pub fn npo_min_trace_height(&self, op_type: &NpoTypeId) -> usize {
+        self.min_trace_height.max(
+            self.npo_min_trace_heights
+                .iter()
+                .find(|(key, _)| key == op_type)
+                .map_or(1, |(_, height)| *height),
+        )
+    }
+
     /// Number of consecutive HornerAcc steps packed into one scheduled ALU row (lane 0).
     pub const fn horner_packed_steps(&self) -> usize {
         self.horner_packed_steps
@@ -183,6 +246,14 @@ impl TablePacking {
         if self.min_trace_height == 0 || !self.min_trace_height.is_power_of_two() {
             return Err(ProofMetadataError::BadMinTraceHeight(self.min_trace_height));
         }
+        if let Some(&height) = self
+            .primitive_min_trace_heights
+            .iter()
+            .chain(self.npo_min_trace_heights.iter().map(|(_, height)| height))
+            .find(|height| **height == 0 || !height.is_power_of_two())
+        {
+            return Err(ProofMetadataError::BadMinTraceHeight(height));
+        }
         if self.horner_packed_steps < 2 {
             return Err(ProofMetadataError::BadHornerPackedSteps(
                 self.horner_packed_steps,
@@ -195,6 +266,32 @@ impl TablePacking {
 impl Default for TablePacking {
     fn default() -> Self {
         Self::new(1, 1)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn per_table_minimums_compose_with_global_floor() {
+        let recompose = NpoTypeId::recompose();
+        let packing = TablePacking::new(4, 8)
+            .with_min_trace_height(32)
+            .with_primitive_min_trace_height(PrimitiveOpType::Alu, 64)
+            .with_npo_min_trace_height(recompose.clone(), 128);
+
+        assert_eq!(
+            packing.primitive_min_trace_height(PrimitiveOpType::Const),
+            32
+        );
+        assert_eq!(packing.primitive_min_trace_height(PrimitiveOpType::Alu), 64);
+        assert_eq!(packing.npo_min_trace_height(&recompose), 128);
+        assert_eq!(
+            packing.npo_min_trace_height(&NpoTypeId::recompose_with_coeff_lookups()),
+            32
+        );
+        packing.validate().unwrap();
     }
 }
 

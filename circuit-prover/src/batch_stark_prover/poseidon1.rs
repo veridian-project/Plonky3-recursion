@@ -895,7 +895,7 @@ impl Poseidon1Prover {
             return None;
         }
 
-        let min_height = packing.min_trace_height();
+        let min_height = packing.npo_min_trace_height(&self.poseidon1_op_type());
         let witness_ctl_scale = <CF as BasedVectorSpace<Val<SC>>>::DIMENSION as u32;
         self.batch_instance_base_impl::<SC>(t, min_height, witness_ctl_scale)
     }
@@ -1209,7 +1209,7 @@ where
         if rows == 0 {
             return None;
         }
-        let min_height = packing.min_trace_height();
+        let min_height = packing.npo_min_trace_height(&self.poseidon1_op_type());
         self.batch_instance_base_impl::<SC>(t, min_height, 5)
     }
 

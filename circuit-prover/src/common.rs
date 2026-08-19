@@ -178,11 +178,8 @@ where
         non_primitive_base.extend(plugin_prep);
     }
 
-    // Get min_height from packing configuration and pass it to AIRs
-    let min_height = packing.min_trace_height();
-
-    // Helper to compute degree that respects min_height
-    let compute_degree = |num_rows: usize| -> usize {
+    // Helper to compute a degree that respects the selected table's minimum height.
+    let compute_degree = |num_rows: usize, min_height: usize| -> usize {
         let natural_height = num_rows.next_power_of_two();
         let min_rows = min_height.next_power_of_two();
         log2_ceil_usize(natural_height.max(min_rows))
@@ -194,6 +191,7 @@ where
     #[allow(clippy::needless_range_loop)]
     for idx in 0..base_prep.len() {
         let table = PrimitiveOpType::from(idx);
+        let min_height = packing.primitive_min_trace_height(table);
         match table {
             PrimitiveOpType::Alu => {
                 // ALU preprocessed per op from circuit.rs: 12 values
@@ -319,7 +317,10 @@ where
                 .with_min_height(min_height);
                 let num_entries = alu_air.scheduled_entry_count();
                 let num_rows = num_entries.div_ceil(effective_alu_lanes);
-                table_preps.push((CircuitTableAir::Alu(alu_air), compute_degree(num_rows)));
+                table_preps.push((
+                    CircuitTableAir::Alu(alu_air),
+                    compute_degree(num_rows, min_height),
+                ));
             }
             PrimitiveOpType::Public => {
                 // Public preprocessed per op from circuit.rs: 1 value (D-scaled out_idx).
@@ -346,7 +347,7 @@ where
                 let num_rows = num_ops.div_ceil(effective_public_lanes);
                 table_preps.push((
                     CircuitTableAir::Public(public_air),
-                    compute_degree(num_rows),
+                    compute_degree(num_rows, min_height),
                 ));
             }
             PrimitiveOpType::Const => {
@@ -365,7 +366,10 @@ where
                 base_prep[idx] = prep_2col;
                 let const_air = ConstAir::new_with_preprocessed(height, base_prep[idx].clone())
                     .with_min_height(min_height);
-                table_preps.push((CircuitTableAir::Const(const_air), compute_degree(height)));
+                table_preps.push((
+                    CircuitTableAir::Const(const_air),
+                    compute_degree(height, min_height),
+                ));
             }
         }
     }
@@ -378,6 +382,7 @@ where
             let lanes = packing
                 .npo_lanes(op_type)
                 .unwrap_or_else(|| builder.lanes());
+            let min_height = packing.npo_min_trace_height(op_type);
             if let Some((air, degree)) =
                 builder.try_build(op_type, prep_base, min_height, lanes, constraint_profile)
             {

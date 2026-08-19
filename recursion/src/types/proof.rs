@@ -155,6 +155,18 @@ pub struct CommonDataTargets<SC: StarkGenericConfig, Comm> {
     pub lookups: Vec<Vec<Lookup<Val<SC>>>>,
 }
 
+impl<SC: StarkGenericConfig, Comm> CommonDataTargets<SC, Comm> {
+    /// Return the allocated preprocessed commitment, if this proof family has one.
+    ///
+    /// Recursive applications use this to constrain the verifier-supplied
+    /// commitment to an application-approved circuit registry.
+    pub fn preprocessed_commitment(&self) -> Option<&Comm> {
+        self.preprocessed
+            .as_ref()
+            .map(|preprocessed| &preprocessed.commitment)
+    }
+}
+
 impl<SC: StarkGenericConfig, Comm> Recursive<SC::Challenge> for CommonDataTargets<SC, Comm>
 where
     Comm: Recursive<

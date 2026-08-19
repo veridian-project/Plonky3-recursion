@@ -1,3 +1,5 @@
+use alloc::borrow::Cow;
+
 use p3_baby_bear::BabyBear;
 use p3_circuit::builder::CircuitBuilder;
 use p3_circuit::ops::poseidon1_perm::{
@@ -1408,11 +1410,13 @@ impl<F: PrimeCharacteristicRing> BaseAir<F> for ForwardingProbeAir {
         self.periodic.len()
     }
 
-    fn periodic_columns(&self) -> Vec<Vec<F>> {
-        self.periodic
-            .iter()
-            .map(|col| col.iter().map(|&v| F::from_u64(v)).collect())
-            .collect()
+    fn periodic_columns(&self) -> Cow<'_, [Vec<F>]> {
+        Cow::Owned(
+            self.periodic
+                .iter()
+                .map(|col| col.iter().map(|&v| F::from_u64(v)).collect())
+                .collect(),
+        )
     }
 }
 

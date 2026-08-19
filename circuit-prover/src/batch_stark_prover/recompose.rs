@@ -93,7 +93,7 @@ impl<const D: usize> RecomposeProver<D> {
                 }
             })
             .unwrap_or(self.lanes);
-        let min_height = packing.min_trace_height();
+        let min_height = packing.npo_min_trace_height(&op_type);
 
         let coeff_lookups = self.coeff_lookups;
         let prep_lane_width =

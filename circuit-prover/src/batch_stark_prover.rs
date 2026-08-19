@@ -1396,7 +1396,9 @@ where
 
         // Build matrices and AIRs per table.
         let packing = &self.table_packing;
-        let min_height = packing.min_trace_height();
+        let const_min_height = packing.primitive_min_trace_height(PrimitiveTable::Const);
+        let public_min_height = packing.primitive_min_trace_height(PrimitiveTable::Public);
+        let alu_min_height = packing.primitive_min_trace_height(PrimitiveTable::Alu);
 
         // The table implementation adds a dummy row when empty, so a trace length <= 1 means
         // the Alu table has only dummy operations.
@@ -1407,9 +1409,9 @@ where
         let const_rows = traces.const_trace.values.len();
         let const_prep = primitive[PrimitiveOpType::Const as usize].clone();
         let const_air = ConstAir::<Val<SC>, D>::new_with_preprocessed(const_rows, const_prep)
-            .with_min_height(min_height);
+            .with_min_height(const_min_height);
         let const_matrix: RowMajorMatrix<Val<SC>> =
-            ConstAir::<Val<SC>, D>::trace_to_matrix(&traces.const_trace, min_height);
+            ConstAir::<Val<SC>, D>::trace_to_matrix(&traces.const_trace, const_min_height);
 
         // Public — reduce lanes to 1 if the table has only dummy operations.
         let public_trace_only_dummy = traces.public_trace.values.len() <= 1;
@@ -1422,11 +1424,11 @@ where
         let public_air =
             PublicAir::<Val<SC>, D>::new_with_preprocessed(public_rows, public_lanes, public_prep)
                 .with_exposed_ops(packing.exposed_public_inputs())
-                .with_min_height(min_height);
+                .with_min_height(public_min_height);
         let public_matrix: RowMajorMatrix<Val<SC>> = PublicAir::<Val<SC>, D>::trace_to_matrix(
             &traces.public_trace,
             public_lanes,
-            min_height,
+            public_min_height,
         );
 
         // ALU — preprocessed is already in 10-col format (with multiplicities) from
@@ -1439,7 +1441,7 @@ where
         let reduction = AluExtMulKind::resolve(D, w_binomial, alu_quintic)
             .ok_or(BatchStarkProverError::MissingWForExtension)?;
         // The packed-Horner schedule and the resulting preprocessed trace matrix depend only on
-        // (alu_prep, alu_lanes, horner_k, min_height), not on D, so both are cached in
+        // (alu_prep, alu_lanes, horner_k, alu_min_height), not on D, so both are cached in
         // `circuit_prover_data` and reused across proofs of this circuit shape.
         let (alu_schedule, cached_prep_trace) = {
             let mut cache = circuit_prover_data.alu_schedule_cache.borrow_mut();
@@ -1447,14 +1449,14 @@ where
                 Some((cached_lanes, cached_k, cached_min_height, schedule, prep_trace))
                     if *cached_lanes == alu_lanes
                         && *cached_k == horner_k
-                        && *cached_min_height == min_height =>
+                        && *cached_min_height == alu_min_height =>
                 {
                     (schedule.clone(), prep_trace.clone())
                 }
                 _ => {
                     let schedule =
                         AluAir::<Val<SC>, D>::compute_schedule_for(&alu_prep, alu_lanes, horner_k);
-                    *cache = Some((alu_lanes, horner_k, min_height, schedule.clone(), None));
+                    *cache = Some((alu_lanes, horner_k, alu_min_height, schedule.clone(), None));
                     (schedule, None)
                 }
             }
@@ -1467,7 +1469,7 @@ where
             horner_k,
             alu_schedule,
         )
-        .with_min_height(min_height);
+        .with_min_height(alu_min_height);
         if let Some(prep_trace) = cached_prep_trace {
             alu_air = alu_air.with_precomputed_prep_trace(prep_trace);
         } else if let Some(prep_trace) = alu_air.preprocessed_trace() {
@@ -1477,13 +1479,13 @@ where
                 cache.as_mut()
                 && *cached_lanes == alu_lanes
                 && *cached_k == horner_k
-                && *cached_min_height == min_height
+                && *cached_min_height == alu_min_height
             {
                 *cached_prep_trace = Some(prep_trace);
             }
         }
         let alu_matrix: RowMajorMatrix<Val<SC>> =
-            alu_air.trace_to_matrix(&traces.alu_trace, min_height);
+            alu_air.trace_to_matrix(&traces.alu_trace, alu_min_height);
         let alu_scheduled_entries = alu_air.scheduled_entry_count();
 
         // We first handle all non-primitive tables dynamically, which will then be batched alongside primitive ones.
@@ -1568,7 +1570,7 @@ where
                 let p = &self.non_primitive_provers[pi];
                 if let Some(new_air) = p.air_with_committed_preprocessed(
                     committed_prep.clone(),
-                    min_height,
+                    packing.npo_min_trace_height(&instance.op_type),
                     instance.lanes,
                     D as u32,
                 ) {
@@ -1666,7 +1668,10 @@ where
                 rows,
             } = instance;
             air_storage.push(CircuitTableAir::Dynamic(air));
-            trace.pad_to_min_power_of_two_height(min_height, Val::<SC>::ZERO);
+            trace.pad_to_min_power_of_two_height(
+                packing.npo_min_trace_height(&op_type),
+                Val::<SC>::ZERO,
+            );
             trace_storage.push(trace);
             public_storage.push(public_values);
             non_primitive_meta.push((op_type, rows, lanes, AirVariant::Baseline));
@@ -1714,7 +1719,7 @@ where
                         if let Some(prover) = prover
                             && let Some(air) = prover.air_with_committed_preprocessed(
                                 committed_prep.clone(),
-                                min_height,
+                                packing.npo_min_trace_height(op_type),
                                 *lanes,
                                 D as u32,
                             )
@@ -1822,16 +1827,14 @@ where
         let packing = &proof.table_packing;
         let public_lanes = packing.public_lanes();
         let alu_lanes = packing.alu_lanes();
-        let min_height = packing.min_trace_height();
-
         let const_air = CircuitTableAir::Const(
             ConstAir::<Val<SC>, D>::new(proof.rows[PrimitiveTable::Const])
-                .with_min_height(min_height),
+                .with_min_height(packing.primitive_min_trace_height(PrimitiveTable::Const)),
         );
         let public_air = CircuitTableAir::Public(
             PublicAir::<Val<SC>, D>::new(proof.rows[PrimitiveTable::Public], public_lanes)
                 .with_exposed_ops(packing.exposed_public_inputs())
-                .with_min_height(min_height),
+                .with_min_height(packing.primitive_min_trace_height(PrimitiveTable::Public)),
         );
         let horner_k = packing.horner_packed_steps();
         let reduction =
@@ -1844,7 +1847,7 @@ where
                 reduction,
             )
             .with_horner_pack_k(horner_k)
-            .with_min_height(min_height),
+            .with_min_height(packing.primitive_min_trace_height(PrimitiveTable::Alu)),
         );
         let mut airs = vec![const_air, public_air, alu_air];
         let mut pvs: Vec<Vec<Val<SC>>> =
