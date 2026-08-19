@@ -326,11 +326,20 @@ where
                 // Public preprocessed per op from circuit.rs: 1 value (D-scaled out_idx).
                 // Convert to [ext_mult, out_idx] pairs using ext_reads.
                 let mut prep_2col: Vec<Val<SC>> = Vec::with_capacity(base_prep[idx].len() * 2);
-                for &out_idx in &base_prep[idx] {
+                let duplicate_outputs = &preprocessed.dup_primitive_outputs[idx];
+                if duplicate_outputs.len() != base_prep[idx].len() {
+                    return Err(CircuitError::InvalidPreprocessedValues);
+                }
+                let neg_one = <Val<SC>>::ZERO - <Val<SC>>::ONE;
+                for (ordinal, &out_idx) in base_prep[idx].iter().enumerate() {
                     let out_wid =
                         (<Val<SC> as PrimeField64>::as_canonical_u64(&out_idx) as usize) / D;
                     let n_reads = preprocessed.ext_reads.get(out_wid).copied().unwrap_or(0);
-                    prep_2col.push(<Val<SC>>::from_u32(n_reads));
+                    prep_2col.push(if duplicate_outputs[ordinal] {
+                        neg_one
+                    } else {
+                        <Val<SC>>::from_u32(n_reads)
+                    });
                     prep_2col.push(out_idx);
                 }
 
@@ -354,10 +363,19 @@ where
                 // Const preprocessed per op from circuit.rs: 1 value (D-scaled out_idx).
                 // Convert to [ext_mult, out_idx] pairs using ext_reads.
                 let mut prep_2col: Vec<Val<SC>> = Vec::with_capacity(base_prep[idx].len() * 2);
-                for &out_idx in &base_prep[idx] {
+                let duplicate_outputs = &preprocessed.dup_primitive_outputs[idx];
+                if duplicate_outputs.len() != base_prep[idx].len() {
+                    return Err(CircuitError::InvalidPreprocessedValues);
+                }
+                let neg_one = <Val<SC>>::ZERO - <Val<SC>>::ONE;
+                for (ordinal, &out_idx) in base_prep[idx].iter().enumerate() {
                     let out_wid = out_idx.as_canonical_u64() as usize / D;
                     let n_reads = preprocessed.ext_reads.get(out_wid).copied().unwrap_or(0);
-                    prep_2col.push(<Val<SC>>::from_u32(n_reads));
+                    prep_2col.push(if duplicate_outputs[ordinal] {
+                        neg_one
+                    } else {
+                        <Val<SC>>::from_u32(n_reads)
+                    });
                     prep_2col.push(out_idx);
                 }
 

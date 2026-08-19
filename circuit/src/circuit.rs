@@ -21,15 +21,20 @@ use crate::{AluOpKind, CircuitError};
 pub struct PreprocessedColumns<F, const D: usize> {
     pub primitive: Vec<Vec<F>>,
     pub non_primitive: NonPrimitivePreprocessedMap<F>,
+    /// Per-primitive-table output-occurrence flags. A `true` entry marks a row whose
+    /// canonical witness was already created by an earlier primitive or NPO row, so this
+    /// occurrence reads the WitnessChecks bus instead of creating the witness again.
+    pub dup_primitive_outputs: Vec<Vec<bool>>,
     /// Ext-field read counts per witness index (indexed by `WitnessId.0`).
     ///
     /// `ext_reads[i]` is the number of times `WitnessId(i)` is read by any table
     /// as an extension-field value. This is used by creator tables to set their
     /// signed multiplicity on the `WitnessChecks` bus.
     pub ext_reads: Vec<u32>,
-    /// Per-NPO duplicate-output flags: `dup_npo_outputs[op_type][wid] == true` means
-    /// `WitnessId(wid)` was already defined by an earlier op and this NPO occurrence is
-    /// a reader, not the creator. Populated by `generate_preprocessed_columns`.
+    /// Per-NPO output-occurrence flags, in preprocessed-row order. A `true` entry means
+    /// that output occurrence was already defined by an earlier op and is a reader, not
+    /// the creator. Occurrence ordering is required because one witness can appear first
+    /// as a creator and later as a reader in the same NPO table.
     pub dup_npo_outputs: HashMap<NpoTypeId, Vec<bool>>,
     /// WitnessId.0 values for all `Op::Hint` outputs in the circuit.
     ///
@@ -45,6 +50,7 @@ impl<F: PartialEq, const D: usize> PartialEq for PreprocessedColumns<F, D> {
         self.primitive == other.primitive
             && self.ext_reads == other.ext_reads
             && self.non_primitive == other.non_primitive
+            && self.dup_primitive_outputs == other.dup_primitive_outputs
             && self.dup_npo_outputs == other.dup_npo_outputs
             && self.hint_output_wids == other.hint_output_wids
     }
@@ -57,6 +63,7 @@ impl<F: Field + Clone, const D: usize> Clone for PreprocessedColumns<F, D> {
         Self {
             primitive: self.primitive.clone(),
             non_primitive: self.non_primitive.clone(),
+            dup_primitive_outputs: self.dup_primitive_outputs.clone(),
             ext_reads: self.ext_reads.clone(),
             dup_npo_outputs: self.dup_npo_outputs.clone(),
             hint_output_wids: self.hint_output_wids.clone(),
@@ -71,6 +78,7 @@ impl<F: Field, const D: usize> PreprocessedColumns<F, D> {
         Self {
             primitive: vec![vec![]; PrimitiveOpType::COUNT],
             non_primitive: NonPrimitivePreprocessedMap::new(),
+            dup_primitive_outputs: vec![vec![]; PrimitiveOpType::COUNT],
             ext_reads: Vec::new(),
             dup_npo_outputs: HashMap::new(),
             hint_output_wids: hashbrown::HashSet::new(),
@@ -243,6 +251,7 @@ impl<F: Field> Circuit<F> {
         // Const and Public define their outputs first. ALU ops define their output (forward)
         // or their `b` operand (backward/sub encoding where `out` was already defined).
         let mut defined = vec![false; self.witness_count as usize];
+        let mut creator_counts = vec![0_u32; self.witness_count as usize];
 
         // Private input witness IDs: these get their bus creator role from the first
         // ALU op that uses them, rather than from a Public table row.
@@ -297,7 +306,15 @@ impl<F: Field> Circuit<F> {
                     if out_idx >= defined.len() {
                         defined.resize(out_idx + 1, false);
                     }
-                    defined[out_idx] = true;
+                    let already_defined = defined[out_idx];
+                    preprocessed.dup_primitive_outputs[PrimitiveOpType::Const as usize]
+                        .push(already_defined);
+                    if already_defined {
+                        preprocessed.increment_ext_reads(&[*out]);
+                    } else {
+                        defined[out_idx] = true;
+                        creator_counts[out_idx] += 1;
+                    }
                 }
                 // Public: creates the output witness value. Store D-scaled out index.
                 // No ext_reads increment: Public is a creator, not a reader.
@@ -308,7 +325,15 @@ impl<F: Field> Circuit<F> {
                     if out_idx >= defined.len() {
                         defined.resize(out_idx + 1, false);
                     }
-                    defined[out_idx] = true;
+                    let already_defined = defined[out_idx];
+                    preprocessed.dup_primitive_outputs[PrimitiveOpType::Public as usize]
+                        .push(already_defined);
+                    if already_defined {
+                        preprocessed.increment_ext_reads(&[*out]);
+                    } else {
+                        defined[out_idx] = true;
+                        creator_counts[out_idx] += 1;
+                    }
                 }
                 // Unified ALU operations with selectors for operation kind.
                 //
@@ -433,6 +458,7 @@ impl<F: Field> Circuit<F> {
                             defined.resize(out_idx + 1, false);
                         }
                         defined[out_idx] = true;
+                        creator_counts[out_idx] += 1;
                     }
                     if b_is_creator == F::ONE {
                         let b_idx = b.0 as usize;
@@ -440,6 +466,7 @@ impl<F: Field> Circuit<F> {
                             defined.resize(b_idx + 1, false);
                         }
                         defined[b_idx] = true;
+                        creator_counts[b_idx] += 1;
                     }
                     if a_state == F::TWO {
                         let a_idx = a.0 as usize;
@@ -447,6 +474,7 @@ impl<F: Field> Circuit<F> {
                             defined.resize(a_idx + 1, false);
                         }
                         defined[a_idx] = true;
+                        creator_counts[a_idx] += 1;
                     }
                     if c_state == F::TWO {
                         let c_idx = c_wid.0 as usize;
@@ -454,6 +482,7 @@ impl<F: Field> Circuit<F> {
                             defined.resize(c_idx + 1, false);
                         }
                         defined[c_idx] = true;
+                        creator_counts[c_idx] += 1;
                     }
                 }
                 Op::NonPrimitiveOpWithExecutor {
@@ -462,22 +491,62 @@ impl<F: Field> Circuit<F> {
                     outputs,
                     ..
                 } => {
+                    let op_type = executor.op_type();
+                    let npo_prep_len_before = preprocessed
+                        .non_primitive
+                        .get(op_type)
+                        .map_or(0, Vec::len);
                     executor.preprocess(inputs, outputs, &mut preprocessed)?;
 
-                    let op_type = executor.op_type();
-                    // `recompose/coeff` advertises hint-derived coefficient inputs as
-                    // WitnessChecks creators. Mark them defined before later ALU uses so
-                    // those operations become readers instead of double-creating the value.
+                    // `recompose/coeff` binds hint-derived coefficient inputs on the
+                    // WitnessChecks bus. The first occurrence creates a coefficient;
+                    // later occurrences read the same witness. Non-hint coefficients
+                    // retain the existing skip role because their owning operation
+                    // supplies the circuit-level binding.
                     if *op_type == NpoTypeId::recompose_with_coeff_lookups() {
-                        for wid in inputs.iter().flatten() {
-                            if hint_output_wids.contains(&wid.0) {
+                        let coefficients = inputs.first().ok_or_else(|| {
+                            CircuitError::InvalidNonPrimitiveOpConfiguration {
+                                op: op_type.clone(),
+                            }
+                        })?;
+                        let mut coefficient_readers = Vec::new();
+                        {
+                            let prep = preprocessed
+                                .non_primitive
+                                .get_mut(op_type)
+                                .ok_or_else(|| {
+                                    CircuitError::InvalidNonPrimitiveOpConfiguration {
+                                        op: op_type.clone(),
+                                    }
+                                })?;
+                            let appended = &mut prep[npo_prep_len_before..];
+                            let expected = 2 + 2 * coefficients.len();
+                            if appended.len() != expected {
+                                return Err(CircuitError::InvalidNonPrimitiveOpConfiguration {
+                                    op: op_type.clone(),
+                                });
+                            }
+                            for (index, wid) in coefficients.iter().enumerate() {
+                                let role = &mut appended[3 + 2 * index];
+                                if !hint_output_wids.contains(&wid.0) {
+                                    *role = F::ZERO;
+                                    continue;
+                                }
                                 let wid_idx = wid.0 as usize;
                                 if wid_idx >= defined.len() {
                                     defined.resize(wid_idx + 1, false);
                                 }
-                                defined[wid_idx] = true;
+                                if defined[wid_idx] {
+                                    *role = F::ZERO - F::ONE;
+                                    coefficient_readers.push(*wid);
+                                } else {
+                                    *role = F::ONE;
+                                    defined[wid_idx] = true;
+                                    creator_counts[wid_idx] += 1;
+                                }
                             }
                         }
+                        preprocessed.increment_ext_reads(&coefficient_readers);
                     }
 
                     // Track duplicate non-primitive outputs: first occurrence is a creator,
@@ -486,21 +555,20 @@ impl<F: Field> Circuit<F> {
                     for out_limb in outputs.iter().take(n_exposed) {
                         for wid in out_limb {
                             let wid_idx = wid.0 as usize;
-                            if wid_idx < defined.len() && defined[wid_idx] {
-                                let dup = preprocessed
-                                    .dup_npo_outputs
-                                    .entry(op_type.clone())
-                                    .or_default();
-                                if wid_idx >= dup.len() {
-                                    dup.resize(wid_idx + 1, false);
-                                }
-                                dup[wid_idx] = true;
+                            let already_defined = wid_idx < defined.len() && defined[wid_idx];
+                            preprocessed
+                                .dup_npo_outputs
+                                .entry(op_type.clone())
+                                .or_default()
+                                .push(already_defined);
+                            if already_defined {
                                 preprocessed.increment_ext_reads(&[*wid]);
                             } else {
                                 if wid_idx >= defined.len() {
                                     defined.resize(wid_idx + 1, false);
                                 }
                                 defined[wid_idx] = true;
+                                creator_counts[wid_idx] += 1;
                             }
                         }
                     }
@@ -515,6 +583,20 @@ impl<F: Field> Circuit<F> {
         let size = self.witness_count as usize;
         if preprocessed.ext_reads.len() < size {
             preprocessed.ext_reads.resize(size, 0);
+        }
+        for (index, (&readers, &creators)) in preprocessed
+            .ext_reads
+            .iter()
+            .zip(&creator_counts)
+            .enumerate()
+        {
+            if readers > 0 && creators != 1 {
+                return Err(CircuitError::InvalidWitnessCreatorCount {
+                    witness_id: WitnessId(index as u32),
+                    creators,
+                    readers,
+                });
+            }
         }
 
         // Safety: every private input must have been claimed as a creator by some ALU op,
@@ -538,15 +620,20 @@ impl<F: Field> Circuit<F> {
 
 #[cfg(test)]
 mod tests {
+    use alloc::boxed::Box;
+    use alloc::sync::Arc;
     use alloc::vec;
 
     use hashbrown::HashMap;
-    use p3_test_utils::baby_bear_params::{BabyBear, PrimeCharacteristicRing};
+    use p3_test_utils::baby_bear_params::{
+        BabyBear, BinomialExtensionField, PrimeCharacteristicRing,
+    };
     use strum::EnumCount;
 
     use super::*;
-    use crate::ops::PrimitiveOpType;
-    use crate::types::WitnessId;
+    use crate::ops::recompose::RecomposeExecutor;
+    use crate::ops::{HintExecutor, PrimitiveOpType};
+    use crate::types::{NonPrimitiveOpId, WitnessId};
 
     type F = BabyBear;
 
@@ -567,11 +654,131 @@ mod tests {
             PreprocessedColumns {
                 primitive: vec![vec![]; PrimitiveOpType::COUNT],
                 non_primitive: HashMap::new(),
+                dup_primitive_outputs: vec![vec![]; PrimitiveOpType::COUNT],
                 ext_reads: vec![0],
                 dup_npo_outputs: HashMap::new(),
                 hint_output_wids: hashbrown::HashSet::new(),
             }
         );
+    }
+
+    #[test]
+    fn connected_const_and_public_have_one_creator_and_one_reader() {
+        let mut builder = crate::CircuitBuilder::<F>::new();
+        let zero = builder.define_const(F::ZERO);
+        let public = builder.public_input();
+        builder.connect(zero, public);
+        let one = builder.define_const(F::ONE);
+        builder.add(public, one);
+
+        let circuit = builder.build().expect("build connected public circuit");
+        let shared = circuit.expr_to_widx[&zero];
+        assert_eq!(shared, circuit.expr_to_widx[&public]);
+        let preprocessed = circuit
+            .generate_preprocessed_columns::<1>()
+            .expect("generate preprocessed columns");
+
+        assert_eq!(
+            preprocessed.dup_primitive_outputs[PrimitiveOpType::Const as usize],
+            vec![false, false]
+        );
+        assert_eq!(
+            preprocessed.dup_primitive_outputs[PrimitiveOpType::Public as usize],
+            vec![true]
+        );
+        assert_eq!(
+            preprocessed.ext_reads[shared.0 as usize],
+            2,
+            "the public alias and ALU use are both bus readers"
+        );
+    }
+
+    #[derive(Clone, Debug)]
+    struct NoopHint;
+
+    impl<T: Field> HintExecutor<T> for NoopHint {
+        fn execute(
+            &self,
+            _inputs: &[WitnessId],
+            _outputs: &[WitnessId],
+            _witness: &mut [Option<T>],
+        ) -> Result<(), CircuitError> {
+            Ok(())
+        }
+
+        fn boxed(&self) -> Box<dyn HintExecutor<T>> {
+            Box::new(self.clone())
+        }
+    }
+
+    #[test]
+    fn reused_hint_coefficients_are_created_once_then_read() {
+        type Ext4 = BinomialExtensionField<BabyBear, 4>;
+
+        let coeffs = vec![WitnessId(2), WitnessId(3), WitnessId(4), WitnessId(5)];
+        let executor = RecomposeExecutor::new(
+            4,
+            Arc::new(|values: &[Ext4]| values[0]),
+            NpoTypeId::recompose_with_coeff_lookups(),
+            true,
+        );
+        let mut circuit = Circuit::<Ext4>::new(8, HashMap::new());
+        circuit.ops = vec![
+            Op::Const {
+                out: WitnessId(0),
+                val: Ext4::ZERO,
+            },
+            Op::Public {
+                out: WitnessId(1),
+                public_pos: 0,
+            },
+            Op::Hint {
+                inputs: vec![WitnessId(1)],
+                outputs: coeffs.clone(),
+                executor: Box::new(NoopHint),
+            },
+            Op::NonPrimitiveOpWithExecutor {
+                inputs: vec![coeffs.clone()],
+                outputs: vec![vec![WitnessId(6)]],
+                executor: Box::new(executor.clone()),
+                op_id: NonPrimitiveOpId(0),
+            },
+            Op::NonPrimitiveOpWithExecutor {
+                inputs: vec![coeffs.clone()],
+                outputs: vec![vec![WitnessId(6)]],
+                executor: Box::new(executor),
+                op_id: NonPrimitiveOpId(1),
+            },
+        ];
+        circuit.public_rows = vec![WitnessId(1)];
+
+        let preprocessed = circuit
+            .generate_preprocessed_columns::<4>()
+            .expect("generate preprocessed columns");
+        let rows = &preprocessed.non_primitive
+            [&NpoTypeId::recompose_with_coeff_lookups()];
+        const ROW_WIDTH: usize = 2 + 2 * 4;
+        assert_eq!(rows.len(), 2 * ROW_WIDTH);
+        assert_eq!(
+            preprocessed.dup_npo_outputs
+                [&NpoTypeId::recompose_with_coeff_lookups()],
+            vec![false, true],
+            "the reused NPO output must retain first-creator occurrence order"
+        );
+        assert_eq!(preprocessed.ext_reads[6], 1);
+        for coefficient in 0..4 {
+            let role = 3 + 2 * coefficient;
+            assert_eq!(rows[role], Ext4::ONE, "first occurrence must create");
+            assert_eq!(
+                rows[ROW_WIDTH + role],
+                Ext4::ZERO - Ext4::ONE,
+                "later occurrence must read"
+            );
+            assert_eq!(
+                preprocessed.ext_reads[coeffs[coefficient].0 as usize],
+                1
+            );
+        }
     }
 
     #[test]
@@ -655,6 +862,11 @@ mod tests {
                     ],
                 ],
                 non_primitive: HashMap::new(),
+                dup_primitive_outputs: vec![
+                    vec![false, false],
+                    vec![false],
+                    vec![],
+                ],
                 // ext_reads: op1 reads a=0,b=1; op2 reads a=3,b=2; op3 reads a=4,b=2
                 ext_reads: vec![1, 1, 2, 1, 1],
                 dup_npo_outputs: HashMap::new(),
@@ -702,6 +914,7 @@ mod tests {
                     ],
                 ],
                 non_primitive: HashMap::new(),
+                dup_primitive_outputs: vec![vec![], vec![], vec![]],
                 //                    0  1  2  3  4  5  6  7  8  9 10 11 12 13 14 15
                 ext_reads: vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
                 dup_npo_outputs: HashMap::new(),
@@ -758,6 +971,11 @@ mod tests {
                     ],
                 ],
                 non_primitive: HashMap::new(),
+                dup_primitive_outputs: vec![
+                    vec![false, false, false],
+                    vec![],
+                    vec![],
+                ],
                 // ext_reads: 0(a)=1, 1(b)=1, 2(c)=1
                 ext_reads: vec![1, 1, 1],
                 dup_npo_outputs: HashMap::new(),

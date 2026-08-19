@@ -182,9 +182,9 @@ where
 
     // Phase 2: update out_ctl values in the base-field preprocessed data.
     //
-    // Duplicate creators (from optimizer witness_rewrite deduplication)
-    // are recorded in plugin-owned metadata under this op_type. For those, out_ctl = -1
-    // (reader contribution). For first-occurrence creators, out_ctl = +ext_reads[wid].
+    // Duplicate creators (from optimizer witness_rewrite deduplication) are recorded in
+    // preprocessed-row order under this op_type. Duplicate occurrences use out_ctl = -1
+    // (reader contribution); first occurrences use out_ctl = +ext_reads[wid].
     let mut non_primitive_base: NonPrimitivePreprocessedMap<F> = HashMap::new();
     for (op_type, prep) in preprocessed.non_primitive.iter() {
         let op_str = op_type.as_str();
@@ -197,7 +197,8 @@ where
         let (d, w_ext, r_ext) = parse_cfg(rest).ok_or(CircuitError::InvalidPreprocessedValues)?;
         let prep_row_width = poseidon_preprocessed_row_width_for_air(d, w_ext, r_ext);
 
-        let dup_wids = preprocessed.dup_npo_outputs.get(op_type);
+        let duplicate_outputs = preprocessed.dup_npo_outputs.get(op_type);
+        let mut output_ordinal = 0;
 
         let mut prep_base: Vec<F> = prep
             .iter()
@@ -229,9 +230,10 @@ where
                 if out_ctl != F::ZERO {
                     let idx = prep_base[o0];
                     let out_wid = F::as_canonical_u64(&idx) as usize / D;
-                    let is_dup = dup_wids
-                        .and_then(|d| d.get(out_wid).copied())
+                    let is_dup = duplicate_outputs
+                        .and_then(|flags| flags.get(output_ordinal).copied())
                         .unwrap_or(false);
+                    output_ordinal += 1;
                     prep_base[ctl_off] = if is_dup {
                         neg_one
                     } else {
@@ -240,6 +242,9 @@ where
                     };
                 }
             }
+        }
+        if duplicate_outputs.is_some_and(|flags| output_ordinal != flags.len()) {
+            return Err(CircuitError::InvalidPreprocessedValues);
         }
 
         non_primitive_base.insert(op_type.clone(), prep_base);

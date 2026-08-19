@@ -46,6 +46,16 @@ pub enum CircuitError {
     )]
     UnclaimedPrivateInput { witness_id: WitnessId },
 
+    /// A witness read on the global bus must have exactly one creator occurrence.
+    #[error(
+        "WitnessId({witness_id}) has {creators} creator occurrences and {readers} reader occurrences; expected exactly one creator"
+    )]
+    InvalidWitnessCreatorCount {
+        witness_id: WitnessId,
+        creators: u32,
+        readers: u32,
+    },
+
     /// WitnessId out of bounds.
     #[error("WitnessId({witness_id}) out of bounds")]
     WitnessIdOutOfBounds { witness_id: WitnessId },

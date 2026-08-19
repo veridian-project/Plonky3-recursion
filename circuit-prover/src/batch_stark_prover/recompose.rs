@@ -333,7 +333,7 @@ where
         let is_dup = prep
             .dup_npo_outputs
             .get(op_type)
-            .and_then(|d| d.get(out_wid).copied())
+            .and_then(|flags| flags.get(row_idx).copied())
             .unwrap_or(false);
 
         if is_dup {
@@ -347,14 +347,27 @@ where
             for i in 0..D {
                 let coeff_idx_val = prep_base[row_start + 2 + i * 2];
                 let coeff_wid = F::as_canonical_u64(&coeff_idx_val) as usize / D;
-                let n_coeff_reads = if prep.hint_output_wids.contains(&(coeff_wid as u32)) {
-                    prep.ext_reads.get(coeff_wid).copied().unwrap_or(0)
+                let role = prep_base[row_start + 2 + i * 2 + 1];
+                let multiplicity = if role == F::ONE {
+                    F::from_u32(prep.ext_reads.get(coeff_wid).copied().unwrap_or(0))
+                } else if role == neg_one {
+                    neg_one
+                } else if role == F::ZERO {
+                    F::ZERO
                 } else {
-                    0
+                    return Err(CircuitError::InvalidPreprocessedValues);
                 };
-                prep_base[row_start + 2 + i * 2 + 1] = F::from_u32(n_coeff_reads);
+                prep_base[row_start + 2 + i * 2 + 1] = multiplicity;
             }
         }
+    }
+
+    if prep
+        .dup_npo_outputs
+        .get(op_type)
+        .is_some_and(|flags| flags.len() != num_rows)
+    {
+        return Err(CircuitError::InvalidPreprocessedValues);
     }
 
     let mut result = HashMap::new();
