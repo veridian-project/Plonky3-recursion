@@ -18,7 +18,7 @@ use p3_util::zip_eq::zip_eq;
 use super::{FriProofTargets, InputProofTargets};
 use crate::Target;
 use crate::pcs::{
-    MmcsProofTargets, verify_batch_circuit, verify_batch_circuit_arity4,
+    MmcsMultiProofTargets, verify_batch_circuit, verify_batch_circuit_arity4,
     verify_batch_circuit_from_extension_opened, verify_batch_circuit_from_extension_opened_arity4,
 };
 use crate::traits::{ComsWithOpeningsTargets, Recursive, RecursiveExtensionMmcs, RecursiveMmcs};
@@ -1392,16 +1392,16 @@ where
     EF: ExtensionField<F>,
     RecMmcs: RecursiveExtensionMmcs<F, EF>,
     RecMmcs::Commitment: ObservableCommitment,
-    RecMmcs::Proof: MmcsProofTargets,
+    RecMmcs::MultiProof: MmcsMultiProofTargets,
     Inner: RecursiveMmcs<F, EF>,
-    Inner::Proof: MmcsProofTargets,
+    Inner::MultiProof: MmcsMultiProofTargets,
     Witness: Recursive<EF>,
     Comm: ObservableCommitment,
 {
     builder.push_scope("verify_fri");
 
     let num_phases = betas.len();
-    let num_queries = fri_proof_targets.query_proofs.len();
+    let num_queries = index_bits_per_query.len();
     let log_arities = &fri_proof_targets.log_arities;
 
     let total_log_reduction: usize = log_arities.iter().sum();
@@ -1471,38 +1471,60 @@ where
         ));
     }
 
-    // The global FRI schedule (`log_arities`) is derived from the first query proof
-    // only (see `FriProofTargets::new`). Every other query is *assumed* to share that
-    // schedule; a malformed proof can carry a different per-query schedule or
-    // mis-sized sibling vectors, which would otherwise produce silently dropped
-    // coefficients (`chunks_exact`) or wrong-shape fold arithmetic. Reject any query
-    // whose commit-phase opening count, `log_arity` sequence, or sibling coefficient
-    // count disagrees with the global schedule before building any constraints.
-    let ef_dim = EF::DIMENSION;
-    for (q, query_proof) in fri_proof_targets.query_proofs.iter().enumerate() {
-        if query_proof.commit_phase_openings.len() != num_phases {
+    if fri_proof_targets.commit_phase_openings.len() != num_phases {
+        return Err(VerificationError::InvalidProofShape(format!(
+            "commit-phase opening count must equal number of phases: expected {num_phases}, got {}",
+            fri_proof_targets.commit_phase_openings.len()
+        )));
+    }
+
+    for (batch, opening) in fri_proof_targets.input_openings.iter().enumerate() {
+        if opening.opened_values.len() != num_queries {
             return Err(VerificationError::InvalidProofShape(format!(
-                "query {q}: commit-phase opening count must equal number of phases: expected {}, got {}",
-                num_phases,
-                query_proof.commit_phase_openings.len()
+                "input batch {batch}: query count mismatch: expected {num_queries}, got {}",
+                opening.opened_values.len()
             )));
         }
-        for (phase, opening) in query_proof.commit_phase_openings.iter().enumerate() {
-            let expected_log_arity = log_arities[phase];
-            if opening.log_arity != expected_log_arity {
+        if let Some(salt_queries) = opening.opening_proof.salt_query_count()
+            && salt_queries != num_queries
+        {
+            return Err(VerificationError::InvalidProofShape(format!(
+                "input batch {batch}: salt query count mismatch: expected {num_queries}, got {salt_queries}"
+            )));
+        }
+    }
+
+    let ef_dim = EF::DIMENSION;
+    for (phase, opening) in fri_proof_targets.commit_phase_openings.iter().enumerate() {
+        let expected_log_arity = log_arities[phase];
+        if opening.log_arity != expected_log_arity {
+            return Err(VerificationError::InvalidProofShape(format!(
+                "phase {phase}: log_arity disagrees with global FRI schedule: expected {expected_log_arity}, got {}",
+                opening.log_arity
+            )));
+        }
+        if opening.sibling_coefficients.len() != num_queries {
+            return Err(VerificationError::InvalidProofShape(format!(
+                "phase {phase}: sibling query count mismatch: expected {num_queries}, got {}",
+                opening.sibling_coefficients.len()
+            )));
+        }
+        let expected_coeffs = ((1usize << expected_log_arity) - 1) * ef_dim;
+        for (query, coefficients) in opening.sibling_coefficients.iter().enumerate() {
+            if coefficients.len() != expected_coeffs {
                 return Err(VerificationError::InvalidProofShape(format!(
-                    "query {q} phase {phase}: log_arity disagrees with global FRI schedule: expected {expected_log_arity}, got {}",
-                    opening.log_arity
-                )));
-            }
-            let expected_coeffs = ((1usize << expected_log_arity) - 1) * ef_dim;
-            if opening.sibling_coefficients.len() != expected_coeffs {
-                return Err(VerificationError::InvalidProofShape(format!(
-                    "query {q} phase {phase}: sibling coefficient count must be \
+                    "query {query} phase {phase}: sibling coefficient count must be \
                      (2^log_arity - 1) * EF::DIMENSION = {expected_coeffs}, got {}",
-                    opening.sibling_coefficients.len()
+                    coefficients.len()
                 )));
             }
+        }
+        if let Some(salt_queries) = opening.opening_proof.salt_query_count()
+            && salt_queries != num_queries
+        {
+            return Err(VerificationError::InvalidProofShape(format!(
+                "phase {phase}: salt query count mismatch: expected {num_queries}, got {salt_queries}"
+            )));
         }
     }
 
@@ -1574,21 +1596,26 @@ where
     let mut all_mmcs_op_ids = Vec::new();
 
     // For each query, extract opened values from proof and compute reduced openings and fold.
-    for (q, query_proof) in fri_proof_targets.query_proofs.iter().enumerate() {
+    for q in 0..num_queries {
         builder.push_scope("verify_fri_query");
-        let batch_opened_values: Vec<Vec<Vec<Target>>> = query_proof
-            .input_proof
+        let batch_opened_values: Vec<Vec<Vec<Target>>> = fri_proof_targets
+            .input_openings
             .iter()
-            .map(|batch| batch.opened_values.clone())
+            .map(|batch| batch.opened_values[q].clone())
             .collect();
 
         // Per-batch hiding-MMCS salts (empty for a non-hiding `MerkleTreeMmcs`). These are
         // appended to the leaf preimage during MMCS verification but never enter the FRI
         // polynomial reduction, matching native `MerkleTreeHidingMmcs`.
-        let batch_salts: Vec<Vec<Vec<Target>>> = query_proof
-            .input_proof
+        let batch_salts: Vec<Vec<Vec<Target>>> = fri_proof_targets
+            .input_openings
             .iter()
-            .map(|batch| batch.opening_proof.salt_targets().to_vec())
+            .map(|batch| {
+                batch
+                    .opening_proof
+                    .salt_targets(q)
+                    .map_or_else(Vec::new, <[Vec<Target>]>::to_vec)
+            })
             .collect();
 
         // Arithmetic `open_input` to get (height, ro) descending, plus MMCS op IDs
@@ -1620,10 +1647,10 @@ where
         let initial_folded_eval = reduced_by_height[0].1;
 
         // Pack sibling values for each phase (variable count per phase).
-        let sibling_values_per_phase: Vec<Vec<Target>> = query_proof
+        let sibling_values_per_phase: Vec<Vec<Target>> = fri_proof_targets
             .commit_phase_openings
             .iter()
-            .map(|opening| opening.sibling_values_packed(builder))
+            .map(|opening| opening.sibling_values_packed(builder, q))
             .collect();
 
         if sibling_values_per_phase.len() != num_phases {
@@ -1689,7 +1716,7 @@ where
             for (phase_idx, (commit, opening)) in fri_proof_targets
                 .commit_phase_commits
                 .iter()
-                .zip(query_proof.commit_phase_openings.iter())
+                .zip(fri_proof_targets.commit_phase_openings.iter())
                 .enumerate()
             {
                 let log_arity = log_arities[phase_idx];
@@ -1756,12 +1783,7 @@ where
                 }
 
                 // Hiding FRI MMCS salts the folded-codeword leaf; non-hiding passes `None`.
-                let phase_salts = opening.opening_proof.salt_targets();
-                let salts_for_phase = if phase_salts.is_empty() {
-                    None
-                } else {
-                    Some(phase_salts)
-                };
+                let salts_for_phase = opening.opening_proof.salt_targets(q);
 
                 let commit_phase_ops = if perm_config.is_arity4_shape() {
                     verify_batch_circuit_from_extension_opened_arity4::<F, EF>(

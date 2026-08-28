@@ -407,8 +407,7 @@ impl<F: Field> Circuit<F> {
                     // Private inputs and hint outputs can be b-creators even in
                     // the forward case, matching the a/c operand handling above.
                     let b_is_input_creator = !b_already_defined
-                        && (private_input_wids.contains(&b.0)
-                            || hint_output_wids.contains(&b.0));
+                        && (private_input_wids.contains(&b.0) || hint_output_wids.contains(&b.0));
                     // A hint output in the `out` slot is a backward op: the hint value is given,
                     // so `b` is the witness this row solves for and takes the bus creator role
                     // (the hint output itself is still created via `out_is_creator`).
@@ -492,16 +491,14 @@ impl<F: Field> Circuit<F> {
                     ..
                 } => {
                     let op_type = executor.op_type();
-                    let npo_prep_len_before = preprocessed
-                        .non_primitive
-                        .get(op_type)
-                        .map_or(0, Vec::len);
+                    let npo_prep_len_before =
+                        preprocessed.non_primitive.get(op_type).map_or(0, Vec::len);
                     executor.preprocess(inputs, outputs, &mut preprocessed)?;
 
                     // `recompose/coeff` binds hint-derived coefficient inputs on the
                     // WitnessChecks bus. The first occurrence creates a coefficient;
                     // later occurrences read the same witness. Non-hint coefficients
-                    // retain the existing skip role because their owning operation
+                    // use the skip role because their owning operation
                     // supplies the circuit-level binding.
                     if *op_type == NpoTypeId::recompose_with_coeff_lookups() {
                         let coefficients = inputs.first().ok_or_else(|| {
@@ -511,10 +508,8 @@ impl<F: Field> Circuit<F> {
                         })?;
                         let mut coefficient_readers = Vec::new();
                         {
-                            let prep = preprocessed
-                                .non_primitive
-                                .get_mut(op_type)
-                                .ok_or_else(|| {
+                            let prep =
+                                preprocessed.non_primitive.get_mut(op_type).ok_or_else(|| {
                                     CircuitError::InvalidNonPrimitiveOpConfiguration {
                                         op: op_type.clone(),
                                     }
@@ -687,8 +682,7 @@ mod tests {
             vec![true]
         );
         assert_eq!(
-            preprocessed.ext_reads[shared.0 as usize],
-            2,
+            preprocessed.ext_reads[shared.0 as usize], 2,
             "the public alias and ALU use are both bus readers"
         );
     }
@@ -755,13 +749,11 @@ mod tests {
         let preprocessed = circuit
             .generate_preprocessed_columns::<4>()
             .expect("generate preprocessed columns");
-        let rows = &preprocessed.non_primitive
-            [&NpoTypeId::recompose_with_coeff_lookups()];
+        let rows = &preprocessed.non_primitive[&NpoTypeId::recompose_with_coeff_lookups()];
         const ROW_WIDTH: usize = 2 + 2 * 4;
         assert_eq!(rows.len(), 2 * ROW_WIDTH);
         assert_eq!(
-            preprocessed.dup_npo_outputs
-                [&NpoTypeId::recompose_with_coeff_lookups()],
+            preprocessed.dup_npo_outputs[&NpoTypeId::recompose_with_coeff_lookups()],
             vec![false, true],
             "the reused NPO output must retain first-creator occurrence order"
         );
@@ -774,10 +766,7 @@ mod tests {
                 Ext4::ZERO - Ext4::ONE,
                 "later occurrence must read"
             );
-            assert_eq!(
-                preprocessed.ext_reads[coeffs[coefficient].0 as usize],
-                1
-            );
+            assert_eq!(preprocessed.ext_reads[coeffs[coefficient].0 as usize], 1);
         }
     }
 
@@ -862,11 +851,7 @@ mod tests {
                     ],
                 ],
                 non_primitive: HashMap::new(),
-                dup_primitive_outputs: vec![
-                    vec![false, false],
-                    vec![false],
-                    vec![],
-                ],
+                dup_primitive_outputs: vec![vec![false, false], vec![false], vec![],],
                 // ext_reads: op1 reads a=0,b=1; op2 reads a=3,b=2; op3 reads a=4,b=2
                 ext_reads: vec![1, 1, 2, 1, 1],
                 dup_npo_outputs: HashMap::new(),
@@ -971,11 +956,7 @@ mod tests {
                     ],
                 ],
                 non_primitive: HashMap::new(),
-                dup_primitive_outputs: vec![
-                    vec![false, false, false],
-                    vec![],
-                    vec![],
-                ],
+                dup_primitive_outputs: vec![vec![false, false, false], vec![], vec![],],
                 // ext_reads: 0(a)=1, 1(b)=1, 2(c)=1
                 ext_reads: vec![1, 1, 1],
                 dup_npo_outputs: HashMap::new(),

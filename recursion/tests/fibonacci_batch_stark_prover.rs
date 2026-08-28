@@ -12,7 +12,10 @@ use p3_circuit_prover::{
 use p3_lookup::logup::LogUpGadget;
 use p3_poseidon2_circuit_air::KoalaBearD4Width16;
 use p3_recursion::Poseidon2Config;
-use p3_recursion::pcs::fri::{FriVerifierParams, InputProofTargets, MerkleCapTargets, RecValMmcs};
+use p3_recursion::generation::{FriGenerationParams, generate_batch_fri_witness_context};
+use p3_recursion::pcs::fri::{
+    FriVerifierParams, InputProofTargets, MerkleCapTargets, RecValMmcs, expand_fri_mmcs_paths,
+};
 use p3_recursion::pcs::set_fri_mmcs_private_data;
 use p3_recursion::verifier::verify_p3_batch_proof_circuit;
 use p3_test_utils::koala_bear_params::*;
@@ -198,19 +201,61 @@ fn test_fibonacci_batch_verifier() {
     runner.set_public_inputs(&public_inputs).unwrap();
     runner.set_private_inputs(&private_inputs).unwrap();
 
-    // Set MMCS private data for the verification circuit
-    set_fri_mmcs_private_data::<
+    let verifier_lookups: Vec<Vec<_>> = common
+        .lookups
+        .iter()
+        .map(|lookups| lookups.as_ref().to_vec())
+        .collect();
+    let (_, fri_witness) = generate_batch_fri_witness_context(
+        &airs,
+        &config,
+        batch_proof,
+        &pis,
+        FriGenerationParams {
+            log_final_height: scalars.log_blowup + scalars.log_final_poly_len,
+            commit_pow_bits: scalars.commit_pow_bits,
+            query_pow_bits: scalars.query_pow_bits,
+            num_queries: scalars.num_queries,
+        },
+        common,
+        &lookup_gadget,
+        &verifier_lookups,
+    )
+    .unwrap();
+    let witness_perm = default_koalabear_poseidon2_16();
+    let witness_hash = MyHash::new(witness_perm.clone());
+    let witness_compress = MyCompress::new(witness_perm);
+    let expanded_paths = expand_fri_mmcs_paths::<
         F,
         Challenge,
-        ChallengeMmcs,
         MyMmcs,
+        ChallengeMmcs,
         MyHash,
         MyCompress,
+        MyHash,
+        MyCompress,
+        2,
         DIGEST_ELEMS,
     >(
+        &batch_proof.opening_proof,
+        &fri_witness.input_batches,
+        fri_witness.alpha,
+        &fri_witness.betas,
+        &fri_witness.query_indices,
+        scalars.log_blowup,
+        scalars.log_final_poly_len,
+        &witness_hash,
+        &witness_compress,
+        0,
+        &witness_hash,
+        &witness_compress,
+        0,
+    )
+    .unwrap();
+    set_fri_mmcs_private_data::<F, Challenge, DIGEST_ELEMS>(
         &mut runner,
         &mmcs_op_ids,
-        &batch_stark_proof.proof.opening_proof,
+        &expanded_paths,
         Poseidon2Config::KOALA_BEAR_D4_W16,
     )
     .unwrap();

@@ -1,12 +1,16 @@
 mod common;
 
 use p3_baby_bear::default_babybear_poseidon2_16;
-use p3_circuit::CircuitBuilder;
 use p3_circuit::ops::{generate_poseidon2_trace, generate_recompose_trace};
 use p3_circuit::test_utils::{FibonacciAir, generate_trace_rows};
+use p3_circuit::{CircuitBuilder, CircuitError};
 use p3_field::PrimeCharacteristicRing;
 use p3_poseidon2_circuit_air::BabyBearD4Width16;
-use p3_recursion::pcs::fri::{FriVerifierParams, InputProofTargets, MerkleCapTargets, RecValMmcs};
+use p3_recursion::generation::{FriGenerationParams, generate_uni_fri_witness_context};
+use p3_recursion::pcs::fri::{
+    ExpandedFriMmcsPaths, FriVerifierParams, InputProofTargets, MerkleCapTargets, RecValMmcs,
+    expand_fri_mmcs_paths,
+};
 use p3_recursion::pcs::set_fri_mmcs_private_data;
 use p3_recursion::public_inputs::StarkVerifierInputsBuilder;
 use p3_recursion::{Poseidon2Config, VerificationError, verify_p3_uni_proof_circuit};
@@ -76,6 +80,57 @@ fn build_fibonacci_test_setup() -> FibonacciTestSetup {
     }
 }
 
+fn expand_fibonacci_paths(
+    setup: &FibonacciTestSetup,
+    proof: &p3_uni_stark::Proof<MyConfig>,
+    pis: &[F],
+) -> Result<ExpandedFriMmcsPaths<F, DIGEST_ELEMS>, VerificationError> {
+    let params = setup.fri_verifier_params;
+    let witness = generate_uni_fri_witness_context(
+        &setup.air,
+        &setup.config,
+        proof,
+        pis,
+        FriGenerationParams {
+            log_final_height: params.log_blowup + params.log_final_poly_len,
+            commit_pow_bits: params.commit_pow_bits,
+            query_pow_bits: params.query_pow_bits,
+            num_queries: params.num_queries,
+        },
+        None,
+    )
+    .map_err(|error| VerificationError::InvalidProofShape(error.to_string()))?;
+    let hash = MyHash::new(setup.perm.clone());
+    let compress = MyCompress::new(setup.perm.clone());
+    expand_fri_mmcs_paths::<
+        F,
+        Challenge,
+        MyMmcs,
+        ChallengeMmcs,
+        MyHash,
+        MyCompress,
+        MyHash,
+        MyCompress,
+        2,
+        DIGEST_ELEMS,
+    >(
+        &proof.opening_proof,
+        &witness.input_batches,
+        witness.alpha,
+        &witness.betas,
+        &witness.query_indices,
+        params.log_blowup,
+        params.log_final_poly_len,
+        &hash,
+        &compress,
+        0,
+        &hash,
+        &compress,
+        0,
+    )
+    .map_err(|error| VerificationError::InvalidProofShape(error.to_string()))
+}
+
 fn run_recursive_verifier(
     setup: &FibonacciTestSetup,
     proof: &p3_uni_stark::Proof<MyConfig>,
@@ -130,19 +185,11 @@ fn run_recursive_verifier(
         .set_private_inputs(&private_inputs)
         .map_err(VerificationError::Circuit)?;
 
-    // Set MMCS private data from the FRI proof
-    set_fri_mmcs_private_data::<
-        F,
-        Challenge,
-        ChallengeMmcs,
-        MyMmcs,
-        MyHash,
-        MyCompress,
-        DIGEST_ELEMS,
-    >(
+    let expanded_paths = expand_fibonacci_paths(setup, proof, pis)?;
+    set_fri_mmcs_private_data::<F, Challenge, DIGEST_ELEMS>(
         &mut runner,
         &mmcs_op_ids,
-        &proof.opening_proof,
+        &expanded_paths,
         Poseidon2Config::BABY_BEAR_D4_W16,
     )
     .map_err(|e| VerificationError::InvalidProofShape(e.to_string()))?;
@@ -150,6 +197,16 @@ fn run_recursive_verifier(
     runner.run().map_err(VerificationError::Circuit)?;
 
     Ok(())
+}
+
+fn assert_recursive_rejects_tampering(result: Result<(), VerificationError>) {
+    match result {
+        Err(VerificationError::InvalidProofShape(message))
+            if message.contains("Witness check failed during challenge generation") => {}
+        Err(VerificationError::Circuit(CircuitError::WitnessConflict { .. })) => {}
+        Err(error) => panic!("unexpected recursive rejection: {error}"),
+        Ok(()) => panic!("recursive verifier accepted a tampered proof"),
+    }
 }
 
 #[test]
@@ -160,10 +217,9 @@ fn test_fibonacci_verifier() -> Result<(), VerificationError> {
     run_recursive_verifier(&setup, &setup.proof, &setup.pis)
 }
 
-/// A tampered trace commitment causes the Fiat-Shamir transcript to diverge from the
-/// values used during proving, so the OOD evaluation check fails as a `WitnessConflict`.
+/// A tampered trace commitment changes the Fiat-Shamir transcript. It must fail
+/// either at the bound PoW witness or at a downstream circuit equality.
 #[test]
-#[should_panic(expected = "WitnessConflict")]
 fn test_tampered_trace_commitment() {
     let mut setup = build_fibonacci_test_setup();
 
@@ -172,25 +228,23 @@ fn test_tampered_trace_commitment() {
     roots[0][0] += F::ONE;
     setup.proof.commitments.trace = roots.into();
 
-    run_recursive_verifier(&setup, &setup.proof, &setup.pis).unwrap();
+    assert_recursive_rejects_tampering(run_recursive_verifier(&setup, &setup.proof, &setup.pis));
 }
 
 /// Flipping a coefficient in the FRI final polynomial breaks the low-degree test,
-/// causing a WitnessConflict when the verifier circuit checks the folding equations.
+/// so either its bound PoW witness or the folding equations must reject it.
 #[test]
-#[should_panic(expected = "WitnessConflict")]
 fn test_tampered_fri_final_poly() {
     let mut setup = build_fibonacci_test_setup();
 
     setup.proof.opening_proof.final_poly[0] += Challenge::ONE;
 
-    run_recursive_verifier(&setup, &setup.proof, &setup.pis).unwrap();
+    assert_recursive_rejects_tampering(run_recursive_verifier(&setup, &setup.proof, &setup.pis));
 }
 
-/// Feeding wrong public inputs to the verifier circuit means the constraint
-/// enforcing the Fibonacci output value is not satisfied, yielding a `WitnessConflict`.
+/// Wrong public inputs change the Fiat-Shamir transcript and the claimed AIR
+/// statement, so either the bound PoW witness or a circuit equality must reject.
 #[test]
-#[should_panic(expected = "WitnessConflict")]
 fn test_wrong_public_inputs() {
     let setup = build_fibonacci_test_setup();
 
@@ -198,19 +252,18 @@ fn test_wrong_public_inputs() {
     // Corrupt the claimed output value.
     wrong_pis[2] += F::ONE;
 
-    run_recursive_verifier(&setup, &setup.proof, &wrong_pis).unwrap();
+    assert_recursive_rejects_tampering(run_recursive_verifier(&setup, &setup.proof, &wrong_pis));
 }
 
 /// Modifying an OOD trace evaluation changes the quotient-consistency check
-/// inside the verifier circuit, which results in a `WitnessConflict` at run time.
+/// and transcript, so either the bound PoW witness or a circuit equality must reject.
 #[test]
-#[should_panic(expected = "WitnessConflict")]
 fn test_tampered_ood_evaluation() {
     let mut setup = build_fibonacci_test_setup();
 
     setup.proof.opened_values.trace_local[0] += Challenge::ONE;
 
-    run_recursive_verifier(&setup, &setup.proof, &setup.pis).unwrap();
+    assert_recursive_rejects_tampering(run_recursive_verifier(&setup, &setup.proof, &setup.pis));
 }
 
 /// A proof with fewer query rounds than the circuit expects causes
@@ -221,7 +274,12 @@ fn test_truncated_fri_proof() {
     let setup = build_fibonacci_test_setup();
 
     assert!(
-        !setup.proof.opening_proof.query_proofs.is_empty(),
+        setup
+            .proof
+            .opening_proof
+            .input_openings
+            .first()
+            .is_some_and(|opening| !opening.opened_values.is_empty()),
         "need at least one query round to truncate"
     );
 
@@ -269,22 +327,15 @@ fn test_truncated_fri_proof() {
     runner.set_public_inputs(&public_inputs).unwrap();
     runner.set_private_inputs(&private_inputs).unwrap();
 
-    // Now supply a truncated FRI proof — this gives fewer siblings than op_ids expects.
-    let mut truncated_opening_proof = setup.proof.opening_proof.clone();
-    truncated_opening_proof.query_proofs.pop();
+    // Supply truncated expanded paths, giving fewer siblings than op_ids expects.
+    let mut truncated_paths = expand_fibonacci_paths(&setup, &setup.proof, &setup.pis).unwrap();
+    truncated_paths.input_paths.pop();
+    truncated_paths.commit_phase_paths.pop();
 
-    let result = set_fri_mmcs_private_data::<
-        F,
-        Challenge,
-        ChallengeMmcs,
-        MyMmcs,
-        MyHash,
-        MyCompress,
-        DIGEST_ELEMS,
-    >(
+    let result = set_fri_mmcs_private_data::<F, Challenge, DIGEST_ELEMS>(
         &mut runner,
         &mmcs_op_ids,
-        &truncated_opening_proof,
+        &truncated_paths,
         Poseidon2Config::BABY_BEAR_D4_W16,
     )
     .map_err(|e| VerificationError::InvalidProofShape(e.to_string()));

@@ -28,6 +28,7 @@ fn test_mul_verifier_circuit() -> Result<(), VerificationError> {
         scalars.log_final_poly_len,
         scalars.commit_pow_bits,
         scalars.query_pow_bits,
+        scalars.num_queries,
     );
     let config = make_test_config();
     // Same default permutation make_test_config uses, for the recursive verifier circuit.

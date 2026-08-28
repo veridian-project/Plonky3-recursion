@@ -6,18 +6,18 @@ use core::marker::PhantomData;
 use p3_challenger::{CanObserve, GrindingChallenger};
 use p3_circuit::symbolic::RowSelectorsTargets;
 use p3_circuit::{CircuitBuilder, CircuitBuilderError, NonPrimitiveOpId};
-use p3_commit::{BatchOpening, ExtensionMmcs, Mmcs, OpenedValues, PolynomialSpace};
+use p3_commit::{ExtensionMmcs, Mmcs, OpenedValues, PolynomialSpace};
 use p3_field::coset::TwoAdicMultiplicativeCoset;
 use p3_field::{
     BasedVectorSpace, ExtensionField, Field, PackedValue, PrimeCharacteristicRing, PrimeField64,
     TwoAdicField,
 };
-use p3_fri::{CommitPhaseProofStep, FriProof, HidingFriPcs, QueryProof, TwoAdicFriPcs};
-use p3_merkle_tree::{MerkleTreeHidingMmcs, MerkleTreeMmcs};
+use p3_fri::{BatchMultiOpening, CommitPhaseMultiStep, FriProof, HidingFriPcs, TwoAdicFriPcs};
+use p3_merkle_tree::{MerkleTreeHidingMmcs, MerkleTreeMmcs, PrunedMerklePaths};
 use p3_symmetric::{CryptographicHasher, MerkleCap, PseudoCompressionFunction};
 use p3_uni_stark::{StarkGenericConfig, Val};
-use rand::Rng;
 use rand::distr::{Distribution, StandardUniform};
+use rand::{CryptoRng, SeedableRng};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
@@ -31,7 +31,7 @@ use crate::traits::{
 use crate::types::{OpenedValuesTargetsWithLookups, RecursiveLagrangeSelectors};
 use crate::verifier::{ObservableCommitment, VerificationError};
 
-/// `Recursive` version of `FriProof`.
+/// Recursive representation of the sole v1 shared-opening `FriProof`.
 pub struct FriProofTargets<
     F: Field,
     EF: ExtensionField<F>,
@@ -41,7 +41,8 @@ pub struct FriProofTargets<
 > {
     pub commit_phase_commits: Vec<RecMmcs::Commitment>,
     pub commit_pow_witnesses: Vec<Witness>,
-    pub query_proofs: Vec<QueryProofTargets<F, EF, InputProof, RecMmcs>>,
+    pub input_openings: InputProof,
+    pub commit_phase_openings: Vec<CommitPhaseMultiStepTargets<F, EF, RecMmcs>>,
     pub final_poly: Vec<Target>,
     pub pow_witness: Witness,
     pub log_arities: Vec<usize>,
@@ -70,30 +71,28 @@ impl<
             .map(|witness| Witness::new(circuit, witness))
             .collect();
 
-        let query_proofs = input
-            .query_proofs
+        let input_openings = InputProof::new(circuit, &input.input_openings);
+
+        let commit_phase_openings = input
+            .commit_phase_openings
             .iter()
-            .map(|query| QueryProofTargets::new(circuit, query))
+            .map(|opening| CommitPhaseMultiStepTargets::new(circuit, opening))
             .collect();
 
         let final_poly = circuit
             .alloc_public_inputs(input.final_poly.len(), "FRI final polynomial coefficients");
 
         let log_arities = input
-            .query_proofs
-            .first()
-            .map(|qp| {
-                qp.commit_phase_openings
-                    .iter()
-                    .map(|o| o.log_arity as usize)
-                    .collect()
-            })
-            .unwrap_or_default();
+            .commit_phase_openings
+            .iter()
+            .map(|opening| opening.log_arity as usize)
+            .collect();
 
         Self {
             commit_phase_commits,
             commit_pow_witnesses,
-            query_proofs,
+            input_openings,
+            commit_phase_openings,
             final_poly,
             pow_witness: Witness::new(circuit, &input.query_pow_witness),
             log_arities,
@@ -104,7 +103,8 @@ impl<
         let FriProof {
             commit_phase_commits,
             commit_pow_witnesses,
-            query_proofs,
+            input_openings,
+            commit_phase_openings,
             final_poly,
             query_pow_witness,
         } = input;
@@ -117,84 +117,27 @@ impl<
                     .iter()
                     .flat_map(|w| Witness::get_values(w)),
             )
-            .chain(
-                query_proofs
-                    .iter()
-                    .flat_map(|c| QueryProofTargets::<F, EF, InputProof, RecMmcs>::get_values(c)),
-            )
+            .chain(InputProof::get_values(input_openings).into_iter().chain(
+                commit_phase_openings.iter().flat_map(|opening| {
+                    CommitPhaseMultiStepTargets::<F, EF, RecMmcs>::get_values(opening)
+                }),
+            ))
             .chain(final_poly.iter().copied())
             .chain(Witness::get_values(query_pow_witness))
             .collect()
     }
 
     fn get_private_values(input: &Self::Input) -> Vec<EF> {
-        input
-            .query_proofs
-            .iter()
-            .flat_map(|c| QueryProofTargets::<F, EF, InputProof, RecMmcs>::get_private_values(c))
-            .collect()
-    }
-}
-
-/// `Recursive` version of `QueryProof`.
-pub struct QueryProofTargets<
-    F: Field,
-    EF: ExtensionField<F>,
-    InputProof: Recursive<EF>,
-    RecMmcs: RecursiveExtensionMmcs<F, EF>,
-> {
-    pub input_proof: InputProof,
-    pub commit_phase_openings: Vec<CommitPhaseProofStepTargets<F, EF, RecMmcs>>,
-}
-
-impl<
-    F: Field,
-    EF: ExtensionField<F>,
-    InputProof: Recursive<EF>,
-    RecMmcs: RecursiveExtensionMmcs<F, EF>,
-> Recursive<EF> for QueryProofTargets<F, EF, InputProof, RecMmcs>
-{
-    type Input = QueryProof<EF, RecMmcs::Input, InputProof::Input>;
-
-    fn new(circuit: &mut CircuitBuilder<EF>, input: &Self::Input) -> Self {
-        // Note that the iterator `lens` is updated by each call to `new`. So we can always pass the same `lens` for all structures.
-        let input_proof = InputProof::new(circuit, &input.input_proof);
-        let commit_phase_openings = input
-            .commit_phase_openings
-            .iter()
-            .map(|commitment| CommitPhaseProofStepTargets::new(circuit, commitment))
-            .collect();
-        Self {
-            input_proof,
-            commit_phase_openings,
-        }
-    }
-
-    fn get_values(input: &Self::Input) -> Vec<EF> {
-        InputProof::get_values(&input.input_proof)
+        InputProof::get_private_values(&input.input_openings)
             .into_iter()
-            .chain(
-                input
-                    .commit_phase_openings
-                    .iter()
-                    .flat_map(|o| CommitPhaseProofStepTargets::<_, _, RecMmcs>::get_values(o)),
-            )
-            .collect()
-    }
-
-    fn get_private_values(input: &Self::Input) -> Vec<EF> {
-        InputProof::get_private_values(&input.input_proof)
-            .into_iter()
-            .chain(
-                input.commit_phase_openings.iter().flat_map(|o| {
-                    CommitPhaseProofStepTargets::<_, _, RecMmcs>::get_private_values(o)
-                }),
-            )
+            .chain(input.commit_phase_openings.iter().flat_map(|opening| {
+                CommitPhaseMultiStepTargets::<F, EF, RecMmcs>::get_private_values(opening)
+            }))
             .collect()
     }
 }
 
-/// `Recursive` version of `CommitPhaseProofStep`.
+/// Recursive representation of one shared commit-phase multi-opening.
 ///
 /// Sibling values are stored as **lifted base field coefficients** to enable MMCS verification.
 /// ExtensionMmcs commits by flattening extension elements to base field, so we need the
@@ -204,7 +147,7 @@ impl<
 /// For arity `k = 2^log_arity`, we store `k - 1` sibling values (the queried value is the
 /// folded evaluation from the previous phase). Each sibling is represented by `EF::DIMENSION`
 /// lifted base field coefficients, giving `(k - 1) * EF::DIMENSION` targets total.
-pub struct CommitPhaseProofStepTargets<
+pub struct CommitPhaseMultiStepTargets<
     F: Field,
     EF: ExtensionField<F>,
     RecMmcs: RecursiveExtensionMmcs<F, EF>,
@@ -212,13 +155,13 @@ pub struct CommitPhaseProofStepTargets<
     pub log_arity: usize,
     /// Lifted base field coefficients for all (arity - 1) sibling values, flattened.
     /// Layout: [sib0_c0, sib0_c1, .., sib0_cD, sib1_c0, .., sib{a-2}_cD]
-    pub sibling_coefficients: Vec<Target>,
-    pub opening_proof: RecMmcs::Proof,
+    pub sibling_coefficients: Vec<Vec<Target>>,
+    pub opening_proof: RecMmcs::MultiProof,
     _phantom: PhantomData<(F, EF)>,
 }
 
 impl<F: Field, EF: ExtensionField<F> + BasedVectorSpace<F>, RecMmcs: RecursiveExtensionMmcs<F, EF>>
-    CommitPhaseProofStepTargets<F, EF, RecMmcs>
+    CommitPhaseMultiStepTargets<F, EF, RecMmcs>
 {
     /// Pack a single sibling's lifted base field coefficients into an extension element.
     ///
@@ -242,37 +185,53 @@ impl<F: Field, EF: ExtensionField<F> + BasedVectorSpace<F>, RecMmcs: RecursiveEx
     }
 
     /// Returns all (arity - 1) sibling values as packed extension elements.
-    pub fn sibling_values_packed(&self, circuit: &mut CircuitBuilder<EF>) -> Vec<Target> {
+    pub fn sibling_values_packed(
+        &self,
+        circuit: &mut CircuitBuilder<EF>,
+        query: usize,
+    ) -> Vec<Target> {
         let d = EF::DIMENSION;
         self.sibling_coefficients
+            .get(query)
+            .expect("query shape checked before packing")
             .chunks_exact(d)
             .map(|chunk| Self::pack_one_sibling(chunk, circuit))
             .collect()
     }
 
     /// Returns the single sibling value as a packed extension element (arity-2 convenience).
-    pub fn sibling_value_packed(&self, circuit: &mut CircuitBuilder<EF>) -> Target {
+    pub fn sibling_value_packed(&self, circuit: &mut CircuitBuilder<EF>, query: usize) -> Target {
         debug_assert_eq!(
             self.log_arity, 1,
             "sibling_value_packed is for arity-2 only; use sibling_values_packed for higher arity"
         );
-        Self::pack_one_sibling(&self.sibling_coefficients, circuit)
+        Self::pack_one_sibling(
+            self.sibling_coefficients
+                .get(query)
+                .expect("query shape checked before packing"),
+            circuit,
+        )
     }
 }
 
 impl<F: Field, EF: ExtensionField<F> + BasedVectorSpace<F>, RecMmcs: RecursiveExtensionMmcs<F, EF>>
-    Recursive<EF> for CommitPhaseProofStepTargets<F, EF, RecMmcs>
+    Recursive<EF> for CommitPhaseMultiStepTargets<F, EF, RecMmcs>
 {
-    type Input = CommitPhaseProofStep<EF, RecMmcs::Input>;
+    type Input = CommitPhaseMultiStep<EF, RecMmcs::Input>;
 
     fn new(circuit: &mut CircuitBuilder<EF>, input: &Self::Input) -> Self {
         let log_arity = input.log_arity as usize;
         let arity = 1usize << log_arity;
         let num_siblings = arity - 1;
         let num_coeffs = num_siblings * EF::DIMENSION;
-        let sibling_coefficients =
-            circuit.alloc_private_inputs(num_coeffs, "FRI commit phase sibling coefficients");
-        let opening_proof = RecMmcs::Proof::new(circuit, &input.opening_proof);
+        let sibling_coefficients = input
+            .sibling_values
+            .iter()
+            .map(|_| {
+                circuit.alloc_private_inputs(num_coeffs, "FRI commit phase sibling coefficients")
+            })
+            .collect();
+        let opening_proof = RecMmcs::MultiProof::new(circuit, &input.opening_proof);
         Self {
             log_arity,
             sibling_coefficients,
@@ -282,46 +241,53 @@ impl<F: Field, EF: ExtensionField<F> + BasedVectorSpace<F>, RecMmcs: RecursiveEx
     }
 
     fn get_values(input: &Self::Input) -> Vec<EF> {
-        RecMmcs::Proof::get_values(&input.opening_proof)
+        RecMmcs::MultiProof::get_values(&input.opening_proof)
     }
 
     fn get_private_values(input: &Self::Input) -> Vec<EF> {
         let mut values: Vec<EF> = Vec::new();
-        for sibling_value in &input.sibling_values {
-            let coeffs = sibling_value.as_basis_coefficients_slice();
-            values.extend(coeffs.iter().map(|&c| EF::from(c)));
+        for query_siblings in &input.sibling_values {
+            for sibling_value in query_siblings {
+                let coeffs = sibling_value.as_basis_coefficients_slice();
+                values.extend(coeffs.iter().map(|&c| EF::from(c)));
+            }
         }
-        values.extend(RecMmcs::Proof::get_private_values(&input.opening_proof));
+        values.extend(RecMmcs::MultiProof::get_private_values(
+            &input.opening_proof,
+        ));
         values
     }
 }
 
-/// `Recursive` version of `BatchOpening`.
+/// Recursive representation of one shared input-batch multi-opening.
 ///
 /// Uses **lifted representation**: each base field value is represented as a single extension
 /// field element `EF([v, 0, 0, 0])`. This allows 1:1 correspondence with polynomial values
 /// for arithmetic verification.
-pub struct BatchOpeningTargets<F: Field, EF: ExtensionField<F>, RecMmcs: RecursiveMmcs<F, EF>> {
-    /// The opened row values from each matrix in the batch.
-    /// Each inner vector has one target per base field value.
-    pub opened_values: Vec<Vec<Target>>,
-    /// The proof showing the values are valid openings.
-    pub opening_proof: RecMmcs::Proof,
+pub struct BatchMultiOpeningTargets<F: Field, EF: ExtensionField<F>, RecMmcs: RecursiveMmcs<F, EF>>
+{
+    /// `opened_values[query][matrix][column]`.
+    pub opened_values: Vec<Vec<Vec<Target>>>,
+    pub opening_proof: RecMmcs::MultiProof,
 }
 
 impl<F: Field, EF: ExtensionField<F>, Inner: RecursiveMmcs<F, EF>> Recursive<EF>
-    for BatchOpeningTargets<F, EF, Inner>
+    for BatchMultiOpeningTargets<F, EF, Inner>
 {
-    type Input = BatchOpening<F, Inner::Input>;
+    type Input = BatchMultiOpening<F, Inner::Input>;
 
     fn new(circuit: &mut CircuitBuilder<EF>, input: &Self::Input) -> Self {
         let opened_values = input
             .opened_values
             .iter()
-            .map(|values| circuit.alloc_private_inputs(values.len(), "batch opened values"))
+            .map(|rows| {
+                rows.iter()
+                    .map(|values| circuit.alloc_private_inputs(values.len(), "batch opened values"))
+                    .collect()
+            })
             .collect();
 
-        let opening_proof = Inner::Proof::new(circuit, &input.opening_proof);
+        let opening_proof = Inner::MultiProof::new(circuit, &input.opening_proof);
 
         Self {
             opened_values,
@@ -330,15 +296,16 @@ impl<F: Field, EF: ExtensionField<F>, Inner: RecursiveMmcs<F, EF>> Recursive<EF>
     }
 
     fn get_values(input: &Self::Input) -> Vec<EF> {
-        Inner::Proof::get_values(&input.opening_proof)
+        Inner::MultiProof::get_values(&input.opening_proof)
     }
 
     fn get_private_values(input: &Self::Input) -> Vec<EF> {
         input
             .opened_values
             .iter()
-            .flat_map(|inner| inner.iter().map(|v| EF::from(*v)))
-            .chain(Inner::Proof::get_private_values(&input.opening_proof))
+            .flat_map(|rows| rows.iter())
+            .flat_map(|row| row.iter().map(|v| EF::from(*v)))
+            .chain(Inner::MultiProof::get_private_values(&input.opening_proof))
             .collect()
     }
 }
@@ -423,6 +390,52 @@ impl<F: Field, EF: ExtensionField<F>, const DIGEST_ELEMS: usize> Recursive<EF>
     }
 }
 
+/// Shared pruned Merkle frontier. Boundary hashes are supplied directly to the
+/// non-primitive compression operations, so the circuit allocates no field inputs here.
+pub struct PrunedMerklePathsTargets<F, const DIGEST_ELEMS: usize> {
+    _phantom: PhantomData<F>,
+}
+
+type ValMmcsMultiProof<F, const DIGEST_ELEMS: usize> =
+    PrunedMerklePaths<<F as PackedValue>::Value, DIGEST_ELEMS>;
+
+impl<F: Field, EF: ExtensionField<F>, const DIGEST_ELEMS: usize> Recursive<EF>
+    for PrunedMerklePathsTargets<F, DIGEST_ELEMS>
+{
+    type Input = ValMmcsMultiProof<F, DIGEST_ELEMS>;
+
+    fn new(_circuit: &mut CircuitBuilder<EF>, _input: &Self::Input) -> Self {
+        Self {
+            _phantom: PhantomData,
+        }
+    }
+
+    fn get_values(_input: &Self::Input) -> Vec<EF> {
+        vec![]
+    }
+}
+
+/// Access to per-query salts in a shared MMCS multiproof.
+pub trait MmcsMultiProofTargets {
+    /// Returns one salt row per opened matrix for `query`, or `None` for a non-hiding MMCS.
+    fn salt_targets(&self, query: usize) -> Option<&[Vec<Target>]>;
+
+    /// Number of query salt sets carried by the proof, or `None` for a non-hiding MMCS.
+    fn salt_query_count(&self) -> Option<usize>;
+}
+
+impl<F, const DIGEST_ELEMS: usize> MmcsMultiProofTargets
+    for PrunedMerklePathsTargets<F, DIGEST_ELEMS>
+{
+    fn salt_targets(&self, _query: usize) -> Option<&[Vec<Target>]> {
+        None
+    }
+
+    fn salt_query_count(&self) -> Option<usize> {
+        None
+    }
+}
+
 /// In TwoAdicFriPcs, the POW witness is just a base field element.
 pub struct Witness<F> {
     pub witness: Target,
@@ -472,6 +485,8 @@ where
     type Commitment = MerkleCapTargets<F, DIGEST_ELEMS>;
 
     type Proof = HashProofTargets<F, DIGEST_ELEMS>;
+
+    type MultiProof = PrunedMerklePathsTargets<F, DIGEST_ELEMS>;
 }
 
 /// Arity-4 counterpart of [`RecValMmcs`].
@@ -507,6 +522,8 @@ where
     type Commitment = MerkleCapTargets<F, DIGEST_ELEMS>;
 
     type Proof = HashProofTargets<F, DIGEST_ELEMS>;
+
+    type MultiProof = PrunedMerklePathsTargets<F, DIGEST_ELEMS>;
 }
 
 /// `Recursive` version of an `ExtensionFieldMmcs` where the inner `Mmcs` is a `MerkleTreeMmcs`.
@@ -529,6 +546,8 @@ impl<F: Field, EF: ExtensionField<F>, const DIGEST_ELEMS: usize, RecValMmcs: Rec
     type Commitment = RecValMmcs::Commitment;
 
     type Proof = RecValMmcs::Proof;
+
+    type MultiProof = RecValMmcs::MultiProof;
 }
 
 /// Arity-4 counterpart of [`RecExtensionValMmcs`]. The inner MMCS is the 4-to-1
@@ -552,6 +571,8 @@ impl<F: Field, EF: ExtensionField<F>, const DIGEST_ELEMS: usize, RecValMmcs: Rec
     type Commitment = RecValMmcs::Commitment;
 
     type Proof = RecValMmcs::Proof;
+
+    type MultiProof = RecValMmcs::MultiProof;
 }
 
 /// Access to per-leaf salt targets carried by an MMCS opening proof.
@@ -623,6 +644,66 @@ impl<F, const DIGEST_ELEMS: usize> MmcsProofTargets for HidingHashProofTargets<F
     }
 }
 
+/// Shared hiding-MMCS multiproof targets. The pruned frontier remains NPO private
+/// data; salts are circuit private inputs because they are part of each leaf hash.
+pub struct HidingPrunedMerklePathsTargets<F, const DIGEST_ELEMS: usize> {
+    pub salts: Vec<Vec<Vec<Target>>>,
+    _phantom: PhantomData<F>,
+}
+
+type HidingValMmcsMultiProof<F, const DIGEST_ELEMS: usize> = (
+    Vec<Vec<Vec<<F as PackedValue>::Value>>>,
+    PrunedMerklePaths<<F as PackedValue>::Value, DIGEST_ELEMS>,
+);
+
+impl<F: Field, EF: ExtensionField<F>, const DIGEST_ELEMS: usize> Recursive<EF>
+    for HidingPrunedMerklePathsTargets<F, DIGEST_ELEMS>
+{
+    type Input = HidingValMmcsMultiProof<F, DIGEST_ELEMS>;
+
+    fn new(circuit: &mut CircuitBuilder<EF>, input: &Self::Input) -> Self {
+        let salts = input
+            .0
+            .iter()
+            .map(|query_salts| {
+                query_salts
+                    .iter()
+                    .map(|salt| circuit.alloc_private_inputs(salt.len(), "hiding MMCS leaf salt"))
+                    .collect()
+            })
+            .collect();
+        Self {
+            salts,
+            _phantom: PhantomData,
+        }
+    }
+
+    fn get_values(_input: &Self::Input) -> Vec<EF> {
+        vec![]
+    }
+
+    fn get_private_values(input: &Self::Input) -> Vec<EF> {
+        input
+            .0
+            .iter()
+            .flat_map(|query_salts| query_salts.iter())
+            .flat_map(|salt| salt.iter().map(|&value| EF::from(value)))
+            .collect()
+    }
+}
+
+impl<F, const DIGEST_ELEMS: usize> MmcsMultiProofTargets
+    for HidingPrunedMerklePathsTargets<F, DIGEST_ELEMS>
+{
+    fn salt_targets(&self, query: usize) -> Option<&[Vec<Target>]> {
+        self.salts.get(query).map(Vec::as_slice)
+    }
+
+    fn salt_query_count(&self) -> Option<usize> {
+        Some(self.salts.len())
+    }
+}
+
 /// `Recursive` version of a `MerkleTreeHidingMmcs` where leaf and digest elements are base
 /// field values. Mirrors [`RecValMmcs`] but the leaves are salted (hiding commitment).
 pub struct RecValHidingMmcs<F: Field, const DIGEST_ELEMS: usize, const SALT_ELEMS: usize, H, C, R>
@@ -673,7 +754,7 @@ where
     C: PseudoCompressionFunction<[F; DIGEST_ELEMS], 2>
         + PseudoCompressionFunction<[F::Packing; DIGEST_ELEMS], 2>
         + Sync,
-    R: Rng + Clone + Send,
+    R: CryptoRng + SeedableRng + Send,
     StandardUniform: Distribution<F>,
     [F; DIGEST_ELEMS]: Serialize + for<'a> Deserialize<'a>,
 {
@@ -682,6 +763,8 @@ where
     type Commitment = MerkleCapTargets<F, DIGEST_ELEMS>;
 
     type Proof = HidingHashProofTargets<F, DIGEST_ELEMS>;
+
+    type MultiProof = HidingPrunedMerklePathsTargets<F, DIGEST_ELEMS>;
 }
 
 impl<
@@ -696,7 +779,7 @@ impl<
 where
     H: CryptographicHasher<F, [F; DIGEST_ELEMS]> + Sync,
     C: PseudoCompressionFunction<[F; DIGEST_ELEMS], 2> + Sync,
-    R: Rng + Clone + Send,
+    R: CryptoRng + SeedableRng + Send,
     StandardUniform: Distribution<F>,
     [F; DIGEST_ELEMS]: Serialize + for<'a> Deserialize<'a>,
 {
@@ -705,9 +788,11 @@ where
     type Commitment = MerkleCapTargets<F, DIGEST_ELEMS>;
 
     type Proof = HidingHashProofTargets<F, DIGEST_ELEMS>;
+
+    type MultiProof = HidingPrunedMerklePathsTargets<F, DIGEST_ELEMS>;
 }
 
-pub type InputProofTargets<F, EF, Inner> = Vec<BatchOpeningTargets<F, EF, Inner>>;
+pub type InputProofTargets<F, EF, Inner> = Vec<BatchMultiOpeningTargets<F, EF, Inner>>;
 
 pub type TwoAdicFriProofTargets<F, EF, RecMmcs, Inner> =
     FriProofTargets<F, EF, RecMmcs, InputProofTargets<F, EF, Inner>, Target>;
@@ -715,13 +800,13 @@ pub type TwoAdicFriProofTargets<F, EF, RecMmcs, Inner> =
 impl<F: Field, EF: ExtensionField<F>, Inner: RecursiveMmcs<F, EF>> Recursive<EF>
     for InputProofTargets<F, EF, Inner>
 {
-    type Input = Vec<BatchOpening<F, Inner::Input>>;
+    type Input = Vec<BatchMultiOpening<F, Inner::Input>>;
 
     fn new(circuit: &mut CircuitBuilder<EF>, input: &Self::Input) -> Self {
         let num_batch_openings = input.len();
         let mut batch_openings = Self::with_capacity(num_batch_openings);
         for batch_opening in input.iter() {
-            batch_openings.push(BatchOpeningTargets::new(circuit, batch_opening));
+            batch_openings.push(BatchMultiOpeningTargets::new(circuit, batch_opening));
         }
 
         batch_openings
@@ -731,7 +816,7 @@ impl<F: Field, EF: ExtensionField<F>, Inner: RecursiveMmcs<F, EF>> Recursive<EF>
         input
             .iter()
             .flat_map(|batch_opening| {
-                BatchOpeningTargets::<F, EF, Inner>::get_values(batch_opening)
+                BatchMultiOpeningTargets::<F, EF, Inner>::get_values(batch_opening)
             })
             .collect()
     }
@@ -740,7 +825,7 @@ impl<F: Field, EF: ExtensionField<F>, Inner: RecursiveMmcs<F, EF>> Recursive<EF>
         input
             .iter()
             .flat_map(|batch_opening| {
-                BatchOpeningTargets::<F, EF, Inner>::get_private_values(batch_opening)
+                BatchMultiOpeningTargets::<F, EF, Inner>::get_private_values(batch_opening)
             })
             .collect()
     }
@@ -775,10 +860,10 @@ where
     FriMmcs: Mmcs<SC::Challenge>,
     Comm: Recursive<SC::Challenge> + ObservableCommitment,
     RecursiveInputMmcs: RecursiveMmcs<Val<SC>, SC::Challenge, Input = InputMmcs>,
-    RecursiveInputMmcs::Proof: MmcsProofTargets,
+    RecursiveInputMmcs::MultiProof: MmcsMultiProofTargets,
     RecursiveFriMmcs: RecursiveExtensionMmcs<Val<SC>, SC::Challenge, Input = FriMmcs>,
     RecursiveFriMmcs::Commitment: ObservableCommitment,
-    RecursiveFriMmcs::Proof: MmcsProofTargets,
+    RecursiveFriMmcs::MultiProof: MmcsMultiProofTargets,
     SC::Challenger: GrindingChallenger + CanObserve<FriMmcs::Commitment>,
 {
     type VerifierParams = FriVerifierParams;
@@ -875,16 +960,15 @@ where
             log_final_poly_len,
             commit_pow_bits: _,
             query_pow_bits: _,
-            num_queries: required_num_queries,
+            num_queries,
             permutation_config,
         } = *params;
         let num_betas = opening_proof.commit_phase_commits.len();
-        let num_queries = opening_proof.query_proofs.len();
 
-        if num_queries < required_num_queries {
-            return Err(VerificationError::InvalidProofShape(format!(
-                "FRI proof has {num_queries} queries but verifier params require at least {required_num_queries}"
-            )));
+        if num_queries == 0 {
+            return Err(VerificationError::InvalidProofShape(
+                "FRI verifier params must require at least one query".to_string(),
+            ));
         }
 
         let alpha = challenges[0];
@@ -1199,10 +1283,10 @@ where
     FriMmcs: Mmcs<SC::Challenge>,
     Comm: Recursive<SC::Challenge> + ObservableCommitment + Clone,
     RecursiveInputMmcs: RecursiveMmcs<Val<SC>, SC::Challenge, Input = InputMmcs>,
-    RecursiveInputMmcs::Proof: MmcsProofTargets,
+    RecursiveInputMmcs::MultiProof: MmcsMultiProofTargets,
     RecursiveFriMmcs: RecursiveExtensionMmcs<Val<SC>, SC::Challenge, Input = FriMmcs>,
     RecursiveFriMmcs::Commitment: ObservableCommitment,
-    RecursiveFriMmcs::Proof: MmcsProofTargets,
+    RecursiveFriMmcs::MultiProof: MmcsMultiProofTargets,
     SC::Challenger: GrindingChallenger + CanObserve<FriMmcs::Commitment>,
 {
     type VerifierParams = FriVerifierParams;
@@ -1281,17 +1365,16 @@ where
             log_final_poly_len,
             commit_pow_bits: _,
             query_pow_bits: _,
-            num_queries: required_num_queries,
+            num_queries,
             permutation_config,
         } = *params;
         let fri_proof = &opening_proof.inner_proof;
         let num_betas = fri_proof.commit_phase_commits.len();
-        let num_queries = fri_proof.query_proofs.len();
 
-        if num_queries < required_num_queries {
-            return Err(VerificationError::InvalidProofShape(format!(
-                "FRI proof has {num_queries} queries but verifier params require at least {required_num_queries}"
-            )));
+        if num_queries == 0 {
+            return Err(VerificationError::InvalidProofShape(
+                "FRI verifier params must require at least one query".to_string(),
+            ));
         }
 
         let alpha = challenges[0];

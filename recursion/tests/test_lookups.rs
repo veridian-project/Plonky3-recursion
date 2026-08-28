@@ -18,7 +18,7 @@ use p3_circuit_prover::{
 };
 use p3_lookup::logup::LogUpGadget;
 use p3_poseidon2_circuit_air::BabyBearD4Width16;
-use p3_recursion::generation::generate_batch_challenges;
+use p3_recursion::generation::{FriGenerationParams, generate_batch_challenges};
 use p3_recursion::pcs::fri::{FriVerifierParams, InputProofTargets, MerkleCapTargets, RecValMmcs};
 use p3_recursion::verifier::{CircuitTablesAir, verify_p3_batch_proof_circuit};
 use p3_recursion::{BatchStarkVerifierInputsBuilder, GenerationError, VerificationError};
@@ -156,7 +156,8 @@ fn test_wrong_multiplicities() {
     let common = circuit_prover_data.common_data();
 
     // Now verify the batch STARK proof recursively
-    let (config, fri_verifier_params, pow_bits, log_height_max) = get_recursive_config_and_params();
+    let (config, fri_verifier_params, num_queries, log_height_max) =
+        get_recursive_config_and_params();
 
     // Build the recursive verification circuit
     let mut circuit_builder = setup_circuit_builder();
@@ -167,7 +168,7 @@ fn test_wrong_multiplicities() {
     // Attach verifier without manually building circuit_airs
     let params = Parameters {
         fri_verifier_params,
-        pow_bits,
+        num_queries,
         log_height_max,
     };
     let (verifier_inputs, _all_challenges) = get_verifier_inputs_and_challenges(
@@ -364,10 +365,11 @@ fn get_test_circuit_proof() -> TestCircuitProofData {
         .prove_all_tables(&traces, &circuit_prover_data)
         .unwrap();
 
-    let (config, fri_verifier_params, pow_bits, log_height_max) = get_recursive_config_and_params();
+    let (config, fri_verifier_params, num_queries, log_height_max) =
+        get_recursive_config_and_params();
     let params = Parameters {
         fri_verifier_params,
-        pow_bits,
+        num_queries,
         log_height_max,
     };
     let pis = vec![vec![]; 3];
@@ -398,13 +400,14 @@ fn get_recursive_config_and_params() -> (MyConfig, FriVerifierParams, usize, usi
         scalars.log_final_poly_len,
         scalars.commit_pow_bits,
         scalars.query_pow_bits,
+        scalars.num_queries,
     );
-    let pow_bits = scalars.query_pow_bits;
+    let num_queries = scalars.num_queries;
     let log_height_max = scalars.log_final_poly_len + scalars.log_blowup;
     (
         make_test_config(),
         fri_verifier_params,
-        pow_bits,
+        num_queries,
         log_height_max,
     )
 }
@@ -419,7 +422,7 @@ type ResultVerifierInputsAndChallenges = (
 
 struct Parameters {
     fri_verifier_params: FriVerifierParams,
-    pow_bits: usize,
+    num_queries: usize,
     log_height_max: usize,
 }
 
@@ -481,7 +484,12 @@ fn get_verifier_inputs_and_challenges(
         config,
         &batch_stark_proof.proof,
         pis,
-        Some(&[params.pow_bits, params.log_height_max]),
+        Some(FriGenerationParams {
+            log_final_height: params.log_height_max,
+            commit_pow_bits: params.fri_verifier_params.commit_pow_bits,
+            query_pow_bits: params.fri_verifier_params.query_pow_bits,
+            num_queries: params.num_queries,
+        }),
         common,
         lookup_gadget,
     );

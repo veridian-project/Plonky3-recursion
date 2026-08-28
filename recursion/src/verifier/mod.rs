@@ -8,7 +8,8 @@ mod quotient;
 mod stark;
 
 pub use batch_stark::{
-    CircuitTablesAir, PcsVerifierParams, verify_batch_circuit, verify_p3_batch_proof_circuit,
+    CircuitTablesAir, PcsVerifierParams, reconstruct_p3_batch_circuit_airs_and_lookups,
+    verify_batch_circuit, verify_p3_batch_proof_circuit,
 };
 pub use errors::VerificationError;
 pub use observable::ObservableCommitment;

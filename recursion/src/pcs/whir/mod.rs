@@ -11,6 +11,7 @@ pub mod params;
 pub mod sumcheck;
 pub mod targets;
 pub mod verifier;
+pub mod witness;
 
 pub use gadgets::{
     ConstraintWeightData, eq_eval, eval_constraint_weight, eval_constraints_poly_circuit,
@@ -24,6 +25,7 @@ pub use targets::{
     WhirRoundProofTargets,
 };
 pub use verifier::verify_whir_circuit;
+pub use witness::{WhirWitnessBuildError, expand_whir_mmcs_paths};
 
 #[cfg(test)]
 pub(crate) mod test_util {

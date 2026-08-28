@@ -194,6 +194,125 @@ where
     )
 }
 
+/// Reconstruct the heterogeneous circuit AIRs and lookup contexts from
+/// verifier-known code plus validated proof shape metadata. Both recursive
+/// constraint verification and host transcript replay use this function, so
+/// the prover cannot make them disagree about the FRI opening schedule.
+#[allow(clippy::type_complexity)]
+pub fn reconstruct_p3_batch_circuit_airs_and_lookups<
+    SC: StarkGenericConfig + 'static,
+    const TRACE_D: usize,
+>(
+    config: &SC,
+    proof: &p3_circuit_prover::batch_stark_prover::BatchStarkProof<SC>,
+    non_primitive_provers: &[Box<dyn TableProver<SC>>],
+) -> Result<
+    (
+        Vec<CircuitTablesAir<SC, TRACE_D>>,
+        Vec<Vec<Lookup<Val<SC>>>>,
+    ),
+    VerificationError,
+>
+where
+    Val<SC>: PrimeField64,
+    SC::Challenge: ExtensionField<Val<SC>> + PrimeCharacteristicRing + ExtractBinomialW<Val<SC>>,
+    SymbolicExpressionExt<Val<SC>, SC::Challenge>:
+        Algebra<SymbolicExpression<Val<SC>>> + Algebra<SC::Challenge>,
+{
+    proof
+        .validate()
+        .map_err(|error| VerificationError::InvalidProofShape(error.to_string()))?;
+    if proof.ext_degree != TRACE_D {
+        return Err(VerificationError::InvalidProofShape(format!(
+            "trace extension degree mismatch: proof declares {} but verifier expects {TRACE_D}",
+            proof.ext_degree
+        )));
+    }
+
+    let rows: RowCounts = proof.rows;
+    let packing = proof.table_packing.clone();
+    let alu_air = match proof.alu_variant {
+        AirVariant::Baseline | AirVariant::Optimized => {
+            create_alu_air::<Val<SC>, SC::Challenge, TRACE_D>(
+                rows[PrimitiveTable::Alu],
+                packing.alu_lanes(),
+                packing.horner_packed_steps(),
+                proof.alu_quintic_trinomial,
+            )
+        }
+    };
+    let mut circuit_airs = vec![
+        CircuitTablesAir::Const(ConstAir::<Val<SC>, TRACE_D>::new(
+            rows[PrimitiveTable::Const],
+        )),
+        CircuitTablesAir::Public(
+            PublicAir::<Val<SC>, TRACE_D>::new(
+                rows[PrimitiveTable::Public],
+                packing.public_lanes(),
+            )
+            .with_exposed_ops(packing.exposed_public_inputs()),
+        ),
+        CircuitTablesAir::Alu(alu_air),
+    ];
+
+    if proof.non_primitives.len() != non_primitive_provers.len() {
+        return Err(VerificationError::InvalidProofShape(format!(
+            "non-primitive table count mismatch: expected {}, got {}",
+            non_primitive_provers.len(),
+            proof.non_primitives.len()
+        )));
+    }
+    for (index, (entry, plugin)) in proof
+        .non_primitives
+        .iter()
+        .zip(non_primitive_provers)
+        .enumerate()
+    {
+        let expected_op = TableProver::op_type(plugin.as_ref());
+        if entry.op_type != expected_op {
+            return Err(VerificationError::InvalidProofShape(format!(
+                "non-primitive op_type mismatch at index {index}: expected {expected_op:?}, got {:?}",
+                entry.op_type
+            )));
+        }
+        let air = plugin
+            .batch_air_from_table_entry(config, TRACE_D, proof.ext_degree as u32, entry)
+            .map_err(VerificationError::InvalidProofShape)?;
+        circuit_airs.push(CircuitTablesAir::Dynamic(air));
+    }
+
+    if circuit_airs.len() != proof.proof.degree_bits.len() {
+        return Err(VerificationError::InvalidProofShape(format!(
+            "AIR count {} does not match degree-bit count {}",
+            circuit_airs.len(),
+            proof.proof.degree_bits.len()
+        )));
+    }
+    let is_zk = config.is_zk();
+    let lookups = circuit_airs
+        .iter()
+        .zip(&proof.proof.degree_bits)
+        .map(|(air, &ext_db)| {
+            let base_db = ext_db.checked_sub(is_zk).ok_or_else(|| {
+                VerificationError::InvalidProofShape(format!(
+                    "extended degree bits {ext_db} are smaller than hiding offset {is_zk}"
+                ))
+            })?;
+            let trace_len = 1usize.checked_shl(base_db as u32).ok_or_else(|| {
+                VerificationError::InvalidProofShape(format!(
+                    "base degree bits {base_db} exceed the platform limit"
+                ))
+            })?;
+            Ok(
+                lookups_for_circuit_table_air::<SC, TRACE_D>(&air.to_table_air(), trace_len, is_zk)
+                    .to_vec(),
+            )
+        })
+        .collect::<Result<Vec<_>, VerificationError>>()?;
+
+    Ok((circuit_airs, lookups))
+}
+
 /// Build and attach a recursive verifier circuit for a circuit-prover [`BatchStarkProof`].
 ///
 /// This reconstructs the circuit table AIRs from the proof metadata (rows + packing) so callers
@@ -245,71 +364,10 @@ where
     SymbolicExpressionExt<Val<SC>, SC::Challenge>:
         Algebra<SymbolicExpression<Val<SC>>> + Algebra<SC::Challenge>,
 {
-    proof
-        .validate()
-        .map_err(|e| VerificationError::InvalidProofShape(e.to_string()))?;
-    if proof.ext_degree != TRACE_D {
-        return Err(VerificationError::InvalidProofShape(format!(
-            "trace extension degree mismatch: proof declares {} but verifier expects {TRACE_D}",
-            proof.ext_degree
-        )));
-    }
-    let rows: RowCounts = proof.rows;
-    let packing = proof.table_packing.clone();
-    let public_lanes = packing.public_lanes();
-    let alu_lanes = packing.alu_lanes();
-
-    // Create AluAir with appropriate constructor based on TRACE_D and the stored
-    // primitive ALU variant used during proving.
-    // For now both variants share the same AIR type; this hook allows us to swap
-    // in a different ALU AIR in the future based on `proof.alu_variant`.
-    let alu_air = match proof.alu_variant {
-        AirVariant::Baseline | AirVariant::Optimized => {
-            create_alu_air::<Val<SC>, SC::Challenge, TRACE_D>(
-                rows[PrimitiveTable::Alu],
-                alu_lanes,
-                packing.horner_packed_steps(),
-                proof.alu_quintic_trinomial,
-            )
-        }
-    };
-
-    let mut circuit_airs: Vec<CircuitTablesAir<SC, TRACE_D>> = vec![
-        CircuitTablesAir::Const(ConstAir::<Val<SC>, TRACE_D>::new(
-            rows[PrimitiveTable::Const],
-        )),
-        CircuitTablesAir::Public(
-            PublicAir::<Val<SC>, TRACE_D>::new(rows[PrimitiveTable::Public], public_lanes)
-                .with_exposed_ops(packing.exposed_public_inputs()),
-        ),
-        CircuitTablesAir::Alu(alu_air),
-    ];
-
-    if proof.non_primitives.len() != non_primitive_provers.len() {
-        return Err(VerificationError::InvalidProofShape(format!(
-            "non-primitive table count mismatch: expected {}, got {}",
-            non_primitive_provers.len(),
-            proof.non_primitives.len()
-        )));
-    }
-    for (i, (entry, plugin)) in proof
-        .non_primitives
-        .iter()
-        .zip(non_primitive_provers.iter())
-        .enumerate()
-    {
-        let expected_op = TableProver::op_type(plugin.as_ref());
-        if entry.op_type != expected_op {
-            return Err(VerificationError::InvalidProofShape(format!(
-                "non-primitive op_type mismatch at index {i}: expected {expected_op:?}, got {:?}",
-                entry.op_type
-            )));
-        }
-        let air = plugin
-            .batch_air_from_table_entry(config, TRACE_D, proof.ext_degree as u32, entry)
-            .map_err(VerificationError::InvalidProofShape)?;
-        circuit_airs.push(CircuitTablesAir::Dynamic(air));
-    }
+    let (circuit_airs, verifier_lookups) = reconstruct_p3_batch_circuit_airs_and_lookups::<
+        SC,
+        TRACE_D,
+    >(config, proof, non_primitive_provers)?;
 
     let mut air_public_counts = vec![0usize; NUM_PRIMITIVE_TABLES];
     air_public_counts[PrimitiveTable::Public as usize] = proof.exposed_public_values.len();
@@ -323,38 +381,7 @@ where
         &air_public_counts,
     );
 
-    // Rebuild the lookup contexts from the reconstructed (audited) AIRs instead of trusting
-    // the proof-supplied `common.lookups`, which drives the CTL folding, aux width, and
-    // challenge layout. For an honest proof these are identical (both derived from the same
-    // AIRs); a malformed or malicious lookup set is now ignored rather than believed.
-    if circuit_airs.len() != verifier_inputs.proof_targets.degree_bits.len() {
-        return Err(VerificationError::InvalidProofShape(format!(
-            "AIR count {} does not match degree-bit count {}",
-            circuit_airs.len(),
-            verifier_inputs.proof_targets.degree_bits.len()
-        )));
-    }
-    let is_zk = config.is_zk();
-    verifier_inputs.common_data.lookups = circuit_airs
-        .iter()
-        .zip(&verifier_inputs.proof_targets.degree_bits)
-        .map(|(air, &ext_db)| {
-            let base_db = ext_db.checked_sub(is_zk).ok_or_else(|| {
-                VerificationError::InvalidProofShape(format!(
-                    "extended degree bits {ext_db} are smaller than hiding offset {is_zk}"
-                ))
-            })?;
-            let trace_len = 1usize.checked_shl(base_db as u32).ok_or_else(|| {
-                VerificationError::InvalidProofShape(format!(
-                    "base degree bits {base_db} exceed the platform limit"
-                ))
-            })?;
-            Ok(
-                lookups_for_circuit_table_air::<SC, TRACE_D>(&air.to_table_air(), trace_len, is_zk)
-                    .to_vec(),
-            )
-        })
-        .collect::<Result<_, VerificationError>>()?;
+    verifier_inputs.common_data.lookups = verifier_lookups;
 
     let common = &verifier_inputs.common_data;
 

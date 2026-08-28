@@ -22,7 +22,11 @@ pub use backend::fri::FriRecursionConfig;
 pub use backend::{FriRecursionBackend, FriRecursionBackendD5, FriRecursionBackendForExt};
 pub use challenger::CircuitChallenger;
 pub use challenger_perm::ChallengerPermConfig;
-pub use generation::{GenerationError, PcsGeneration, generate_batch_challenges};
+pub use generation::{
+    BatchFriWitnessContext, FriGenerationParams, FriTranscriptChallenges, GenerationError,
+    PcsGeneration, generate_batch_challenges, generate_batch_fri_witness_context,
+    generate_uni_fri_witness_context,
+};
 pub use p3_circuit::ops;
 pub use p3_circuit::ops::{PermConfig, Poseidon2Config};
 pub use pcs::fri::FriVerifierParams;

@@ -12,7 +12,10 @@ use p3_circuit::test_utils::{FibonacciAir, generate_trace_rows};
 use p3_fri::FriParameters;
 use p3_goldilocks::Poseidon2Goldilocks;
 use p3_matrix::Matrix;
-use p3_recursion::pcs::fri::{FriVerifierParams, InputProofTargets, MerkleCapTargets, RecValMmcs};
+use p3_recursion::generation::{FriGenerationParams, generate_uni_fri_witness_context};
+use p3_recursion::pcs::fri::{
+    FriVerifierParams, InputProofTargets, MerkleCapTargets, RecValMmcs, expand_fri_mmcs_paths,
+};
 use p3_recursion::pcs::set_fri_mmcs_private_data;
 use p3_recursion::public_inputs::StarkVerifierInputsBuilder;
 use p3_recursion::{Poseidon2Config, VerificationError, verify_p3_uni_proof_circuit};
@@ -76,7 +79,7 @@ fn test_goldilocks_fibonacci_verifier() -> Result<(), VerificationError> {
     let mut circuit_builder = CircuitBuilder::new();
     circuit_builder.enable_poseidon2_perm_width_8::<GoldilocksD2Width8, _>(
         generate_poseidon2_trace::<Challenge, GoldilocksD2Width8>,
-        perm,
+        perm.clone(),
     );
     circuit_builder.enable_recompose::<F>(generate_recompose_trace::<F, Challenge>);
 
@@ -123,19 +126,54 @@ fn test_goldilocks_fibonacci_verifier() -> Result<(), VerificationError> {
         .set_private_inputs(&private_inputs)
         .map_err(VerificationError::Circuit)?;
 
-    // Set MMCS private data from the FRI proof
-    set_fri_mmcs_private_data::<
+    let witness = generate_uni_fri_witness_context(
+        &air,
+        &config,
+        &proof,
+        &pis,
+        FriGenerationParams {
+            log_final_height: fri_verifier_params.log_blowup
+                + fri_verifier_params.log_final_poly_len,
+            commit_pow_bits: fri_verifier_params.commit_pow_bits,
+            query_pow_bits: fri_verifier_params.query_pow_bits,
+            num_queries: fri_verifier_params.num_queries,
+        },
+        None,
+    )
+    .map_err(|error| VerificationError::InvalidProofShape(error.to_string()))?;
+    let hash = MyHash::new(perm.clone());
+    let compress = MyCompress::new(perm);
+    let expanded_paths = expand_fri_mmcs_paths::<
         F,
         Challenge,
-        ChallengeMmcs,
         MyMmcs,
+        ChallengeMmcs,
         MyHash,
         MyCompress,
+        MyHash,
+        MyCompress,
+        2,
         DIGEST_ELEMS,
     >(
+        &proof.opening_proof,
+        &witness.input_batches,
+        witness.alpha,
+        &witness.betas,
+        &witness.query_indices,
+        fri_verifier_params.log_blowup,
+        fri_verifier_params.log_final_poly_len,
+        &hash,
+        &compress,
+        0,
+        &hash,
+        &compress,
+        0,
+    )
+    .map_err(|error| VerificationError::InvalidProofShape(error.to_string()))?;
+    set_fri_mmcs_private_data::<F, Challenge, DIGEST_ELEMS>(
         &mut runner,
         &mmcs_op_ids,
-        &proof.opening_proof,
+        &expanded_paths,
         Poseidon2Config::GOLDILOCKS_D2_W8,
     )
     .map_err(|e| VerificationError::InvalidProofShape(e.to_string()))?;
@@ -166,6 +204,7 @@ fn test_goldilocks_mul_verifier_with_preprocessed() -> Result<(), VerificationEr
             fri_params2.log_final_poly_len,
             fri_params2.commit_proof_of_work_bits,
             fri_params2.query_proof_of_work_bits,
+            fri_params2.num_queries,
         );
         let pcs2 = MyPcs::new(Dft::default(), val_mmcs2, fri_params2);
         let challenger2 = Challenger::new(perm2.clone());

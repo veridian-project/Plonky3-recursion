@@ -3225,7 +3225,11 @@ mod proptests {
             .expect("generate preprocessed circuit columns");
         let alu_row = &preprocessed.primitive[crate::ops::PrimitiveOpType::Alu as usize]
             [alu_ordinal * 12..(alu_ordinal + 1) * 12];
-        assert_eq!(alu_row[9], Ext4::ONE, "b operand must create the hint output");
+        assert_eq!(
+            alu_row[9],
+            Ext4::ONE,
+            "b operand must create the hint output"
+        );
     }
 
     #[test]
@@ -3266,8 +3270,7 @@ mod proptests {
             "recompose/coeff must create the hint output before the ALU reads it"
         );
         assert_eq!(
-            preprocessed.ext_reads[coefficient_witness.0 as usize],
-            1,
+            preprocessed.ext_reads[coefficient_witness.0 as usize], 1,
             "the ALU b operand must be counted as a recompose/coeff reader"
         );
     }

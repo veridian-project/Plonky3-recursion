@@ -196,7 +196,7 @@ impl<const WIDTH: usize, const RATE: usize, C: ChallengerPermConfig>
     /// D=1 challenger path for widths other than the compact width-16 layout.
     ///
     /// The rate is CTL-exposed while capacity remains inside the Poseidon chain. This is the
-    /// generic-width counterpart of the established width-16 compact D1 path.
+    /// generic-width form of the width-16 compact D1 path.
     fn duplexing_base_full<EF>(
         &mut self,
         circuit: &mut CircuitBuilder<EF>,

@@ -14,14 +14,8 @@ pub struct FriVerifierParams {
     pub commit_pow_bits: usize,
     /// Number of query proof-of-work bits required
     pub query_pow_bits: usize,
-    /// Minimum number of FRI query proofs required for soundness.
-    ///
-    /// The recursive verifier enforces `proof.query_proofs.len() >= num_queries`
-    /// at circuit-construction time. A circuit built from a proof with fewer
-    /// queries than this threshold is rejected with `InvalidProofShape`.
-    ///
-    /// Set to `0` only for test constructors that intentionally skip this check
-    /// (see [`Self::unsafe_arithmetic_only_for_tests`]).
+    /// Exact verifier-owned FRI query count. The shared proof stores no query
+    /// list from which this consensus parameter could be inferred.
     pub num_queries: usize,
     /// Permutation configuration for MMCS verification (Poseidon1 or Poseidon2).
     /// When `Some`, recursive MMCS verification is performed.
@@ -34,9 +28,9 @@ pub struct FriVerifierParams {
 impl FriVerifierParams {
     /// Create params with MMCS verification enabled.
     ///
-    /// `num_queries` is the minimum number of FRI query proofs required for soundness.
-    /// The circuit verifier enforces this bound at build time and rejects proofs
-    /// that carry fewer queries than required.
+    /// `num_queries` is the exact verifier-owned FRI query count. The circuit
+    /// derives precisely this many indices from the transcript and requires the
+    /// shared opening arrays to have the same shape.
     pub fn with_mmcs(
         log_blowup: usize,
         log_final_poly_len: usize,
@@ -45,6 +39,7 @@ impl FriVerifierParams {
         num_queries: usize,
         permutation_config: impl Into<PermConfig>,
     ) -> Self {
+        assert!(num_queries > 0, "FRI requires at least one query");
         Self {
             log_blowup,
             log_final_poly_len,
@@ -71,20 +66,21 @@ impl FriVerifierParams {
     /// (or other implicit) conversion, so MMCS verification cannot be disabled
     /// accidentally.
     ///
-    /// `num_queries` is set to `0` for this test constructor, meaning no
-    /// minimum query count is enforced. Do **not** rely on this in production.
+    /// `num_queries` remains mandatory and exact even in arithmetic-only tests.
     pub const fn unsafe_arithmetic_only_for_tests(
         log_blowup: usize,
         log_final_poly_len: usize,
         commit_pow_bits: usize,
         query_pow_bits: usize,
+        num_queries: usize,
     ) -> Self {
+        assert!(num_queries > 0, "FRI requires at least one query");
         Self {
             log_blowup,
             log_final_poly_len,
             commit_pow_bits,
             query_pow_bits,
-            num_queries: 0,
+            num_queries,
             permutation_config: None,
         }
     }
@@ -116,17 +112,16 @@ mod tests {
     /// test-only constructor — there is no implicit (`From`/`into`) path.
     #[test]
     fn arithmetic_only_is_the_only_way_to_disable_mmcs() {
-        let params = FriVerifierParams::unsafe_arithmetic_only_for_tests(1, 0, 0, 0);
+        let params = FriVerifierParams::unsafe_arithmetic_only_for_tests(1, 0, 0, 0, 1);
         assert!(
             params.permutation_config.is_none(),
             "arithmetic-only params must not perform MMCS verification"
         );
     }
 
-    /// `with_mmcs` must store the caller-supplied `num_queries` unchanged.
-    /// The recursive verifier enforces `proof.query_proofs.len() >= num_queries`
-    /// at circuit-construction time; an incorrect stored value silently weakens
-    /// FRI soundness.
+    /// `with_mmcs` must store the caller-supplied `num_queries` unchanged. An
+    /// incorrect stored value changes both transcript replay and shared-proof
+    /// shape, silently changing FRI soundness.
     #[test]
     fn with_mmcs_stores_num_queries() {
         let params = FriVerifierParams::with_mmcs(2, 0, 0, 16, 42, p2());
@@ -136,14 +131,13 @@ mod tests {
         );
     }
 
-    /// The test-only constructor disables the query-count lower-bound check by
-    /// storing 0, which is always satisfied (`N >= 0` for any `usize N`).
+    /// The test-only constructor still stores the exact query count.
     #[test]
-    fn arithmetic_only_sets_num_queries_zero() {
-        let params = FriVerifierParams::unsafe_arithmetic_only_for_tests(1, 0, 0, 0);
+    fn arithmetic_only_stores_num_queries() {
+        let params = FriVerifierParams::unsafe_arithmetic_only_for_tests(1, 0, 0, 0, 3);
         assert_eq!(
-            params.num_queries, 0,
-            "unsafe_arithmetic_only_for_tests must disable the query-count check"
+            params.num_queries, 3,
+            "unsafe_arithmetic_only_for_tests must preserve the exact query count"
         );
     }
 }

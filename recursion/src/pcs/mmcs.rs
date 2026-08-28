@@ -5,14 +5,12 @@ use core::cmp::{Reverse, min};
 use itertools::Itertools;
 use p3_circuit::ops::{PermCall, PermConfig, perm_private_data};
 use p3_circuit::{CircuitBuilder, CircuitBuilderError, CircuitRunner, NonPrimitiveOpId};
-use p3_commit::{BatchOpening, Mmcs, OpenedValues};
 use p3_field::{BasedVectorSpace, ExtensionField, Field, PrimeField64, TwoAdicField};
-use p3_fri::FriProof;
 use p3_matrix::Dimensions;
-use p3_symmetric::{CryptographicHasher, PseudoCompressionFunction};
 use p3_util::log2_strict_usize;
 
 use crate::Target;
+use crate::pcs::fri::ExpandedFriMmcsPaths;
 
 /// Hash base field coefficients using overwrite-mode sponge (matching native PaddingFreeSponge).
 ///
@@ -646,234 +644,37 @@ where
         .collect()
 }
 
-/// Set private data for FRI MMCS verification operations.
-///
-/// This function extracts Merkle sibling values from a FRI proof and sets them
-/// as private data for the circuit operations returned by `verify_fri_circuit`.
-///
-/// # Parameters
-/// - `runner`: The circuit runner to set private data on
-/// - `op_ids`: Operation IDs returned by `verify_fri_circuit`
-/// - `fri_proof`: The FRI proof containing Merkle proofs
-///
-/// # Returns
-/// `Ok(())` if all private data was set successfully, or an error if there was a mismatch.
-///
-/// # Operation ID Order
-/// The `op_ids` are expected in the following order (matching `verify_fri_circuit`):
-/// 1. For each query:
-///    - Input batch MMCS ops (one per batch, each with `path_depth` siblings)
-///    - Commit-phase MMCS ops (one per phase, each with `phase_depth` siblings)
-pub fn set_fri_mmcs_private_data<F, EF, FriMmcs, InputMmcs, H, C, const DIGEST_ELEMS: usize>(
+/// Set binary-MMCS private data from fully authenticated paths.
+pub fn set_fri_mmcs_private_data<F, EF, const DIGEST_ELEMS: usize>(
     runner: &mut CircuitRunner<'_, EF>,
     op_ids: &[NonPrimitiveOpId],
-    fri_proof: &FriProof<EF, FriMmcs, F, Vec<BatchOpening<F, InputMmcs>>>,
+    paths: &ExpandedFriMmcsPaths<F, DIGEST_ELEMS>,
     permutation_config: impl Into<PermConfig>,
 ) -> Result<(), &'static str>
 where
     F: Field,
     EF: ExtensionField<F> + BasedVectorSpace<F>,
-    FriMmcs: Mmcs<EF, Proof = Vec<[F; DIGEST_ELEMS]>>,
-    InputMmcs: Mmcs<F, Proof = Vec<[F; DIGEST_ELEMS]>>,
-    H: CryptographicHasher<F, [F; DIGEST_ELEMS]>
-        + CryptographicHasher<F::Packing, [F::Packing; DIGEST_ELEMS]>
-        + Sync,
-    C: PseudoCompressionFunction<[F; DIGEST_ELEMS], 2>
-        + PseudoCompressionFunction<[F::Packing; DIGEST_ELEMS], 2>
-        + Sync,
 {
-    let permutation_config: PermConfig = permutation_config.into();
-    let mut op_idx = 0;
-
-    for query_proof in &fri_proof.query_proofs {
-        // Input batch MMCS proofs
-        for batch_opening in &query_proof.input_proof {
-            let siblings = convert_merkle_proof_to_siblings::<F, EF, DIGEST_ELEMS>(
-                &batch_opening.opening_proof,
-            );
-            for sibling in siblings {
-                if op_idx >= op_ids.len() {
-                    return Err("More siblings in proof than op_ids provided");
-                }
+    let permutation_config = permutation_config.into();
+    let mut op_idx = 0usize;
+    for (input_paths, commit_phase_paths) in paths.input_paths.iter().zip(&paths.commit_phase_paths)
+    {
+        for path in input_paths.iter().chain(commit_phase_paths) {
+            for sibling in convert_merkle_proof_to_siblings::<F, EF, DIGEST_ELEMS>(path) {
+                let Some(&op_id) = op_ids.get(op_idx) else {
+                    return Err("More expanded siblings than MMCS operation IDs");
+                };
                 runner
-                    .set_private_data(
-                        op_ids[op_idx],
-                        perm_private_data(permutation_config, sibling),
-                    )
-                    .map_err(|_| "Failed to set private data for input batch MMCS")?;
-                op_idx += 1;
-            }
-        }
-
-        // Commit-phase MMCS proofs
-        for phase_opening in &query_proof.commit_phase_openings {
-            let siblings = convert_merkle_proof_to_siblings::<F, EF, DIGEST_ELEMS>(
-                &phase_opening.opening_proof,
-            );
-            for sibling in siblings {
-                if op_idx >= op_ids.len() {
-                    return Err("More siblings in proof than op_ids provided");
-                }
-                runner
-                    .set_private_data(
-                        op_ids[op_idx],
-                        perm_private_data(permutation_config, sibling),
-                    )
-                    .map_err(|_| "Failed to set private data for commit-phase MMCS")?;
+                    .set_private_data(op_id, perm_private_data(permutation_config, sibling))
+                    .map_err(|_| "Failed to set expanded FRI MMCS private data")?;
                 op_idx += 1;
             }
         }
     }
-
     if op_idx != op_ids.len() {
-        return Err("Fewer siblings in proof than op_ids provided");
+        return Err("Fewer expanded siblings than MMCS operation IDs");
     }
-
     Ok(())
-}
-
-/// [HidingFriPcs](p3_fri::HidingFriPcs) wraps the inner FRI proof as
-/// `(random_opened_values, inner_fri_proof)`.
-pub(crate) type HidingFriProof<F, EF, FriMmcs, InputMmcs> = (
-    OpenedValues<EF>,
-    FriProof<EF, FriMmcs, F, Vec<BatchOpening<F, InputMmcs>>>,
-);
-
-/// Variant of [`set_fri_mmcs_private_data`] for [HidingFriPcs](p3_fri::HidingFriPcs) opening proofs.
-pub fn set_hiding_fri_mmcs_private_data<
-    F,
-    EF,
-    FriMmcs,
-    InputMmcs,
-    H,
-    C,
-    const DIGEST_ELEMS: usize,
->(
-    runner: &mut CircuitRunner<'_, EF>,
-    op_ids: &[NonPrimitiveOpId],
-    fri_proof: &HidingFriProof<F, EF, FriMmcs, InputMmcs>,
-    permutation_config: impl Into<PermConfig>,
-) -> Result<(), &'static str>
-where
-    F: Field,
-    EF: ExtensionField<F> + BasedVectorSpace<F>,
-    FriMmcs: Mmcs<EF, Proof = Vec<[F; DIGEST_ELEMS]>>,
-    InputMmcs: Mmcs<F, Proof = Vec<[F; DIGEST_ELEMS]>>,
-    H: CryptographicHasher<F, [F; DIGEST_ELEMS]>
-        + CryptographicHasher<F::Packing, [F::Packing; DIGEST_ELEMS]>
-        + Sync,
-    C: PseudoCompressionFunction<[F; DIGEST_ELEMS], 2>
-        + PseudoCompressionFunction<[F::Packing; DIGEST_ELEMS], 2>
-        + Sync,
-{
-    set_fri_mmcs_private_data::<F, EF, FriMmcs, InputMmcs, H, C, DIGEST_ELEMS>(
-        runner,
-        op_ids,
-        &fri_proof.1,
-        permutation_config,
-    )
-}
-
-/// Native salted MMCS proof: `(per-matrix salts, sibling digests)`.
-///
-/// Used by `MerkleTreeHidingMmcs` (and `ExtensionMmcs` wrapping it). Only the sibling
-/// digests are MMCS non-primitive-op private data; the salts flow as circuit private
-/// inputs (see [`HidingHashProofTargets`](crate::pcs::HidingHashProofTargets)).
-type SaltedMmcsProof<F, const DIGEST_ELEMS: usize> = (Vec<Vec<F>>, Vec<[F; DIGEST_ELEMS]>);
-
-/// Variant of [`set_fri_mmcs_private_data`] for a FRI proof whose input and commit-phase
-/// MMCSs are *hiding* (`MerkleTreeHidingMmcs`), i.e. their opening proof is
-/// `(salts, siblings)`. Sets the sibling digests as MMCS private data using only the
-/// `siblings` component; salts are supplied separately as circuit private inputs.
-pub fn set_salted_fri_mmcs_private_data<F, EF, FriMmcs, InputMmcs, const DIGEST_ELEMS: usize>(
-    runner: &mut CircuitRunner<'_, EF>,
-    op_ids: &[NonPrimitiveOpId],
-    fri_proof: &FriProof<EF, FriMmcs, F, Vec<BatchOpening<F, InputMmcs>>>,
-    permutation_config: impl Into<PermConfig>,
-) -> Result<(), &'static str>
-where
-    F: Field,
-    EF: ExtensionField<F> + BasedVectorSpace<F>,
-    FriMmcs: Mmcs<EF, Proof = SaltedMmcsProof<F, DIGEST_ELEMS>>,
-    InputMmcs: Mmcs<F, Proof = SaltedMmcsProof<F, DIGEST_ELEMS>>,
-{
-    let permutation_config: PermConfig = permutation_config.into();
-    let mut op_idx = 0;
-
-    for query_proof in &fri_proof.query_proofs {
-        // Input batch MMCS proofs: `.1` is the sibling digests.
-        for batch_opening in &query_proof.input_proof {
-            let siblings = convert_merkle_proof_to_siblings::<F, EF, DIGEST_ELEMS>(
-                &batch_opening.opening_proof.1,
-            );
-            for sibling in siblings {
-                if op_idx >= op_ids.len() {
-                    return Err("More siblings in proof than op_ids provided");
-                }
-                runner
-                    .set_private_data(
-                        op_ids[op_idx],
-                        perm_private_data(permutation_config, sibling),
-                    )
-                    .map_err(|_| "Failed to set private data for input batch MMCS")?;
-                op_idx += 1;
-            }
-        }
-
-        // Commit-phase MMCS proofs: `.1` is the sibling digests.
-        for phase_opening in &query_proof.commit_phase_openings {
-            let siblings = convert_merkle_proof_to_siblings::<F, EF, DIGEST_ELEMS>(
-                &phase_opening.opening_proof.1,
-            );
-            for sibling in siblings {
-                if op_idx >= op_ids.len() {
-                    return Err("More siblings in proof than op_ids provided");
-                }
-                runner
-                    .set_private_data(
-                        op_ids[op_idx],
-                        perm_private_data(permutation_config, sibling),
-                    )
-                    .map_err(|_| "Failed to set private data for commit-phase MMCS")?;
-                op_idx += 1;
-            }
-        }
-    }
-
-    if op_idx != op_ids.len() {
-        return Err("Fewer siblings in proof than op_ids provided");
-    }
-
-    Ok(())
-}
-
-/// Variant of [`set_salted_fri_mmcs_private_data`] for [HidingFriPcs](p3_fri::HidingFriPcs)
-/// opening proofs (a `(random_opened_values, inner_fri_proof)` tuple) whose underlying
-/// input and commit-phase MMCSs are hiding.
-pub fn set_hiding_salted_fri_mmcs_private_data<
-    F,
-    EF,
-    FriMmcs,
-    InputMmcs,
-    const DIGEST_ELEMS: usize,
->(
-    runner: &mut CircuitRunner<'_, EF>,
-    op_ids: &[NonPrimitiveOpId],
-    fri_proof: &HidingFriProof<F, EF, FriMmcs, InputMmcs>,
-    permutation_config: impl Into<PermConfig>,
-) -> Result<(), &'static str>
-where
-    F: Field,
-    EF: ExtensionField<F> + BasedVectorSpace<F>,
-    FriMmcs: Mmcs<EF, Proof = SaltedMmcsProof<F, DIGEST_ELEMS>>,
-    InputMmcs: Mmcs<F, Proof = SaltedMmcsProof<F, DIGEST_ELEMS>>,
-{
-    set_salted_fri_mmcs_private_data::<F, EF, FriMmcs, InputMmcs, DIGEST_ELEMS>(
-        runner,
-        op_ids,
-        &fri_proof.1,
-        permutation_config,
-    )
 }
 
 /// Round `raw_len` up to a multiple of `n`, mirroring native MMCS height padding.
@@ -1478,38 +1279,27 @@ where
 /// Each arity-4 MMCS opening contributes one compression op-id per Merkle level (repeated once per
 /// proof sibling). This packs each native sibling group into the private payload consumed by the
 /// corresponding compression row.
-pub fn set_fri_mmcs_private_data_arity4<F, EF, FriMmcs, InputMmcs, const DIGEST_ELEMS: usize>(
+pub fn set_fri_mmcs_private_data_arity4<F, EF, const DIGEST_ELEMS: usize>(
     runner: &mut CircuitRunner<'_, EF>,
     op_ids: &[NonPrimitiveOpId],
-    fri_proof: &FriProof<EF, FriMmcs, F, Vec<BatchOpening<F, InputMmcs>>>,
+    paths: &ExpandedFriMmcsPaths<F, DIGEST_ELEMS>,
     permutation_config: impl Into<PermConfig>,
 ) -> Result<(), &'static str>
 where
     F: Field,
     EF: ExtensionField<F> + BasedVectorSpace<F>,
-    FriMmcs: Mmcs<EF, Proof = Vec<[F; DIGEST_ELEMS]>>,
-    InputMmcs: Mmcs<F, Proof = Vec<[F; DIGEST_ELEMS]>>,
 {
     let permutation_config: PermConfig = permutation_config.into();
     let mut op_idx = 0;
 
-    for query_proof in &fri_proof.query_proofs {
-        for batch_opening in &query_proof.input_proof {
+    for (input_paths, commit_phase_paths) in paths.input_paths.iter().zip(&paths.commit_phase_paths)
+    {
+        for path in input_paths.iter().chain(commit_phase_paths) {
             set_arity4_opening_private_data::<F, EF, DIGEST_ELEMS>(
                 runner,
                 op_ids,
                 &mut op_idx,
-                &batch_opening.opening_proof,
-                permutation_config,
-            )?;
-        }
-
-        for phase_opening in &query_proof.commit_phase_openings {
-            set_arity4_opening_private_data::<F, EF, DIGEST_ELEMS>(
-                runner,
-                op_ids,
-                &mut op_idx,
-                &phase_opening.opening_proof,
+                path,
                 permutation_config,
             )?;
         }
@@ -1522,110 +1312,42 @@ where
     Ok(())
 }
 
-/// Arity-4 counterpart of [`set_hiding_fri_mmcs_private_data`].
-pub fn set_hiding_fri_mmcs_private_data_arity4<
-    F,
-    EF,
-    FriMmcs,
-    InputMmcs,
-    const DIGEST_ELEMS: usize,
->(
-    runner: &mut CircuitRunner<'_, EF>,
-    op_ids: &[NonPrimitiveOpId],
-    fri_proof: &HidingFriProof<F, EF, FriMmcs, InputMmcs>,
-    permutation_config: impl Into<PermConfig>,
-) -> Result<(), &'static str>
-where
-    F: Field,
-    EF: ExtensionField<F> + BasedVectorSpace<F>,
-    FriMmcs: Mmcs<EF, Proof = Vec<[F; DIGEST_ELEMS]>>,
-    InputMmcs: Mmcs<F, Proof = Vec<[F; DIGEST_ELEMS]>>,
-{
-    set_fri_mmcs_private_data_arity4::<F, EF, FriMmcs, InputMmcs, DIGEST_ELEMS>(
-        runner,
-        op_ids,
-        &fri_proof.1,
-        permutation_config,
-    )
+/// Complete WHIR authentication paths expanded from its shared multiproofs.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExpandedWhirMmcsPaths<F, const DIGEST_ELEMS: usize> {
+    /// Paths in the exact order emitted by `verify_whir_circuit`.
+    pub paths: Vec<Vec<[F; DIGEST_ELEMS]>>,
 }
 
-/// Set private data for WHIR MMCS verification operations.
-///
-/// Extracts Merkle sibling digests from a [`p3_whir::pcs::proof::WhirProof`] and
-/// sets them as private data for the circuit operations returned by
-/// [`crate::pcs::whir::verify_whir_circuit`].
-///
-/// # Operation ID order
-///
-/// Matches the order in which `verify_whir_circuit` emits `NonPrimitiveOpId`s:
-/// 1. For each intermediate round (in round order), for each STIR query:
-///    sibling digests along the Merkle path, leaf-to-root.
-/// 2. For each final STIR query: sibling digests along the Merkle path.
-pub fn set_whir_mmcs_private_data<F, EF, MT, const DIGEST_ELEMS: usize>(
+/// Set WHIR MMCS private data from complete authenticated paths.
+pub fn set_whir_mmcs_private_data<F, EF, const DIGEST_ELEMS: usize>(
     runner: &mut CircuitRunner<'_, EF>,
     op_ids: &[NonPrimitiveOpId],
-    proof: &p3_whir::pcs::proof::WhirProof<F, EF, MT>,
+    paths: &ExpandedWhirMmcsPaths<F, DIGEST_ELEMS>,
     permutation_config: impl Into<PermConfig>,
 ) -> Result<(), &'static str>
 where
     F: Field,
     EF: ExtensionField<F> + BasedVectorSpace<F>,
-    MT: p3_commit::Mmcs<F, Proof = Vec<[F; DIGEST_ELEMS]>>,
 {
     let permutation_config: PermConfig = permutation_config.into();
     let mut op_idx = 0;
 
-    let mut set_query = |op_ids: &[NonPrimitiveOpId],
-                         op_idx: &mut usize,
-                         opening_proof: &Vec<[F; DIGEST_ELEMS]>,
-                         label: &'static str|
-     -> Result<(), &'static str> {
-        let siblings = convert_merkle_proof_to_siblings::<F, EF, DIGEST_ELEMS>(opening_proof);
+    for path in &paths.paths {
+        let siblings = convert_merkle_proof_to_siblings::<F, EF, DIGEST_ELEMS>(path);
         for sibling in siblings {
-            if *op_idx >= op_ids.len() {
-                return Err(label);
-            }
-            runner
-                .set_private_data(
-                    op_ids[*op_idx],
-                    perm_private_data(permutation_config, sibling),
-                )
-                .map_err(|_| label)?;
-            *op_idx += 1;
-        }
-        Ok(())
-    };
-
-    for round in &proof.rounds {
-        for query in &round.queries {
-            let opening_proof = match query {
-                p3_whir::pcs::proof::QueryOpening::Base { proof, .. } => proof,
-                p3_whir::pcs::proof::QueryOpening::Extension { proof, .. } => proof,
+            let Some(&op_id) = op_ids.get(op_idx) else {
+                return Err("More expanded WHIR siblings than MMCS operation IDs");
             };
-            set_query(
-                op_ids,
-                &mut op_idx,
-                opening_proof,
-                "More siblings than op_ids (round query)",
-            )?;
+            runner
+                .set_private_data(op_id, perm_private_data(permutation_config, sibling))
+                .map_err(|_| "Failed to set expanded WHIR MMCS private data")?;
+            op_idx += 1;
         }
-    }
-
-    for query in &proof.final_queries {
-        let opening_proof = match query {
-            p3_whir::pcs::proof::QueryOpening::Base { proof, .. } => proof,
-            p3_whir::pcs::proof::QueryOpening::Extension { proof, .. } => proof,
-        };
-        set_query(
-            op_ids,
-            &mut op_idx,
-            opening_proof,
-            "More siblings than op_ids (final query)",
-        )?;
     }
 
     if op_idx != op_ids.len() {
-        return Err("Fewer siblings in proof than op_ids provided");
+        return Err("Fewer expanded WHIR siblings than MMCS operation IDs");
     }
 
     Ok(())
@@ -1638,9 +1360,11 @@ mod test {
 
     use p3_circuit::ops::mmcs::format_openings;
     use p3_circuit::ops::{Poseidon2Config, generate_poseidon2_trace, generate_recompose_trace};
+    use p3_commit::Mmcs;
     use p3_matrix::Matrix;
     use p3_matrix::dense::{DenseMatrix, RowMajorMatrix};
     use p3_poseidon2_circuit_air::KoalaBearD4Width16;
+    use p3_symmetric::CryptographicHasher;
     use p3_test_utils::koala_bear_params::*;
     use p3_util::log2_ceil_usize;
     use rand::SeedableRng;

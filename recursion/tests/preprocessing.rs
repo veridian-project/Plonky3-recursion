@@ -290,6 +290,7 @@ fn test_batch_verifier_with_mixed_preprocessed() -> Result<(), VerificationError
         scalars.log_final_poly_len,
         scalars.commit_pow_bits,
         scalars.query_pow_bits,
+        scalars.num_queries,
     );
     let config = make_test_config();
     // Same default permutation make_test_config uses, for the recursive verifier circuit.
@@ -425,6 +426,7 @@ fn run_with_tampered_common(
         scalars.log_final_poly_len,
         scalars.commit_pow_bits,
         scalars.query_pow_bits,
+        scalars.num_queries,
     );
     let config = make_test_config();
     let perm = default_babybear_poseidon2_16();
@@ -582,6 +584,7 @@ fn run_with_tampered_proof(
         scalars.log_final_poly_len,
         scalars.commit_pow_bits,
         scalars.query_pow_bits,
+        scalars.num_queries,
     );
     let config = make_test_config();
     let perm = default_babybear_poseidon2_16();
@@ -701,6 +704,7 @@ fn test_batch_verifier_with_public_values() -> Result<(), VerificationError> {
         scalars.log_final_poly_len,
         scalars.commit_pow_bits,
         scalars.query_pow_bits,
+        scalars.num_queries,
     );
     let config = make_test_config();
     // Same default permutation make_test_config uses, for the recursive verifier circuit.
@@ -785,6 +789,7 @@ fn test_batch_verifier_wrong_public_values() {
         scalars.log_final_poly_len,
         scalars.commit_pow_bits,
         scalars.query_pow_bits,
+        scalars.num_queries,
     );
     let config = make_test_config();
     // Same default permutation make_test_config uses, for the recursive verifier circuit.

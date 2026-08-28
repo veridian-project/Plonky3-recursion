@@ -18,6 +18,7 @@ use p3_dft::Radix2DFTSmallBatch;
 use p3_field::extension::BinomialExtensionField;
 use p3_field::{Field, PrimeCharacteristicRing};
 use p3_koala_bear::{KoalaBear, Poseidon2KoalaBear};
+use p3_matrix::dense::RowMajorMatrix;
 use p3_merkle_tree::MerkleTreeMmcs;
 use p3_multilinear_util::poly::Poly;
 use p3_recursion::Target;
@@ -25,8 +26,9 @@ use p3_recursion::pcs::whir::{
     ConstraintWeightData, WhirProofTargets, WhirVerifierParams, verify_whir_circuit,
 };
 use p3_recursion::traits::RecursiveChallenger;
+use p3_sumcheck::constraints::Statements;
 use p3_sumcheck::layout::{Layout, PrefixProver, Table, Verifier};
-use p3_sumcheck::{OpeningProtocol, TableShape, TableSpec};
+use p3_sumcheck::{OpeningBatch, OpeningProtocol, TableShape, TableSpec};
 use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
 use p3_util::log2_strict_usize;
 use p3_whir::fiat_shamir::domain_separator::DomainSeparator;
@@ -147,11 +149,14 @@ macro_rules! whir_arithmetic_test {
                 let mmcs = MyMmcs::new(hash, compress, 0);
                 let dft = MyDft::default();
 
-                let spec = TableSpec::new(TableShape::new(NUM_VARIABLES, 1), vec![vec![0]]);
+                let spec = TableSpec::new(
+                    TableShape::new(NUM_VARIABLES, 1),
+                    vec![OpeningBatch::new(vec![0], vec![])],
+                );
                 let protocol = OpeningProtocol::new(vec![spec]).pad_to_min_num_variables(FOLDING);
                 let poly = Poly::<BF>::rand(&mut SmallRng::seed_from_u64(42), NUM_VARIABLES);
-                let witness =
-                    PrefixProver::<BF, EF>::new_witness(vec![Table::new(vec![poly])], FOLDING);
+                let table = Table::new(RowMajorMatrix::new(poly.into_evals(), 1 << NUM_VARIABLES));
+                let witness = PrefixProver::<BF, EF>::new_witness(vec![table], FOLDING);
 
                 let whir_params = ProtocolParameters {
                     security_level: 32,
@@ -183,7 +188,7 @@ macro_rules! whir_arithmetic_test {
                     (commitment, proof)
                 };
 
-                let (initial_constraint, initial_claimed_eval, mut vc) = {
+                let (initial_constraint, initial_claimed_eval, alpha, mut vc) = {
                     let mut ch = make_challenger();
                     let mut ds = DomainSeparator::new(vec![]);
                     pcs.add_domain_separator::<8>(&mut ds);
@@ -197,13 +202,14 @@ macro_rules! whir_arithmetic_test {
                         lv.add_virtual_eval(eval, &mut ch);
                     }
                     for ((table_idx, polys), evals) in protocol.iter_openings().zip(&proof.evals) {
-                        lv.add_claim(table_idx, polys, evals, &mut ch);
+                        lv.add_claim(table_idx, polys, evals, &mut ch)
+                            .expect("proof evaluations must match the opening schedule");
                     }
                     let alpha: EF = ch.sample_algebra_element();
                     let constraint = lv.constraint(alpha);
                     let mut claimed_eval = EF::ZERO;
                     constraint.combine_evals(&mut claimed_eval);
-                    (constraint, claimed_eval, ch)
+                    (constraint, claimed_eval, alpha, ch)
                 };
 
                 // Replay Fiat–Shamir transcript across all rounds.
@@ -277,20 +283,28 @@ macro_rules! whir_arithmetic_test {
                 let mut circuit = CircuitBuilder::<EF>::new();
                 let proof_targets = WhirProofTargets::alloc::<BF, EF>(&mut circuit, &vp, 1, 1);
                 let initial_cap: Vec<Vec<Target>> = vec![vec![circuit.define_const(EF::ZERO)]];
-                let gamma_target = circuit.define_const(initial_constraint.challenge);
+                let gamma_target = circuit.define_const(alpha);
                 let eq_points: Vec<Vec<Target>> = initial_constraint
-                    .eq_statement
-                    .points
+                    .statements()
                     .iter()
-                    .map(|pt| {
-                        pt.as_slice()
+                    .flat_map(|statements| match statements {
+                        Statements::Eq(statement) => statement
                             .iter()
-                            .map(|&e| circuit.define_const(e))
-                            .collect()
+                            .map(|(point, _)| {
+                                point
+                                    .as_slice()
+                                    .iter()
+                                    .map(|&e| circuit.define_const(e))
+                                    .collect()
+                            })
+                            .collect::<Vec<_>>(),
+                        Statements::Next(_) | Statements::Select(_) => {
+                            panic!("initial WHIR fixture must contain equality statements only")
+                        }
                     })
                     .collect();
                 let circuit_constraint = ConstraintWeightData {
-                    num_variables: initial_constraint.eq_statement.num_variables(),
+                    num_variables: initial_constraint.num_variables(),
                     eq_points,
                     sel_scalars: vec![],
                     gamma: gamma_target,
@@ -359,30 +373,34 @@ macro_rules! whir_arithmetic_test {
                 // Private inputs: query leaf values across all rounds.
                 let mut private_inputs: Vec<EF> = Vec::new();
                 for r in &proof.whir.rounds {
-                    for q in &r.queries {
-                        match q {
-                            p3_whir::pcs::proof::QueryOpening::Base { values, .. } => {
-                                for &v in values {
+                    match &r.openings {
+                        p3_whir::pcs::proof::QueryOpenings::Base(opening) => {
+                            for row in &opening.rows {
+                                for &v in row {
                                     private_inputs.push(EF::from(v));
                                 }
                             }
-                            p3_whir::pcs::proof::QueryOpening::Extension { values, .. } => {
-                                for &v in values {
+                        }
+                        p3_whir::pcs::proof::QueryOpenings::Extension(opening) => {
+                            for row in &opening.rows {
+                                for &v in row {
                                     private_inputs.push(v);
                                 }
                             }
                         }
                     }
                 }
-                for q in &proof.whir.final_queries {
-                    match q {
-                        p3_whir::pcs::proof::QueryOpening::Base { values, .. } => {
-                            for &v in values {
+                match &proof.whir.final_openings {
+                    p3_whir::pcs::proof::QueryOpenings::Base(opening) => {
+                        for row in &opening.rows {
+                            for &v in row {
                                 private_inputs.push(EF::from(v));
                             }
                         }
-                        p3_whir::pcs::proof::QueryOpening::Extension { values, .. } => {
-                            for &v in values {
+                    }
+                    p3_whir::pcs::proof::QueryOpenings::Extension(opening) => {
+                        for row in &opening.rows {
+                            for &v in row {
                                 private_inputs.push(v);
                             }
                         }

@@ -22,6 +22,9 @@ pub trait RecursiveMmcs<F: Field, EF: ExtensionField<F>> {
     ///
     /// Must implement `Recursive` with `Input` being the proof type from `Self::Input`.
     type Proof: Recursive<EF, Input = <Self::Input as Mmcs<F>>::Proof>;
+
+    /// Recursive targets for the shared multi-opening proof.
+    type MultiProof: Recursive<EF, Input = <Self::Input as Mmcs<F>>::MultiProof>;
 }
 
 /// Trait for the recursive version of an MMCS operating over the extension field.
@@ -42,4 +45,7 @@ pub trait RecursiveExtensionMmcs<F: Field, EF: ExtensionField<F>> {
     ///
     /// Must implement `Recursive` with `Input` being the proof type from `Self::Input`.
     type Proof: Recursive<EF, Input = <Self::Input as Mmcs<EF>>::Proof>;
+
+    /// Recursive targets for the shared multi-opening proof.
+    type MultiProof: Recursive<EF, Input = <Self::Input as Mmcs<EF>>::MultiProof>;
 }

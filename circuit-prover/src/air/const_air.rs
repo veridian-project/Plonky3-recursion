@@ -55,7 +55,7 @@ pub struct ConstAir<F, const D: usize = 1> {
     pub num_ops: usize,
     /// Committed multiplicities, indices, and constant coefficients.
     pub preprocessed: Vec<F>,
-    /// Minimum trace height (for FRI compatibility).
+    /// Minimum trace height required by the FRI commitment geometry.
     pub min_height: usize,
     _phantom: PhantomData<F>,
 }

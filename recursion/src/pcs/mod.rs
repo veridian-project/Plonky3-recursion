@@ -5,16 +5,20 @@ pub mod mmcs;
 pub mod whir;
 
 pub use fri::{
-    BatchOpeningTargets, CommitPhaseProofStepTargets, FriProofTargets, FriVerifierParams,
-    HashProofTargets, HidingFriProofTargets, HidingHashProofTargets, HidingOpenedValuesTargets,
-    InputProofTargets, MerkleCapTargets, MmcsProofTargets, QueryProofTargets, RecExtensionValMmcs,
+    BatchMultiOpeningTargets, CommitPhaseMultiStepTargets, ExpandedFriMmcsPaths, FriInputMatrix,
+    FriProofTargets, FriVerifierParams, FriWitnessBuildError, FriWitnessError, HashProofTargets,
+    HidingFriProofTargets, HidingHashProofTargets, HidingOpenedValuesTargets,
+    HidingPrunedMerklePathsTargets, InputProofTargets, MerkleCapTargets, MerkleWitnessError,
+    MmcsMultiProofTargets, MmcsProofTargets, PrunedMerklePathsTargets, RecExtensionValMmcs,
     RecExtensionValMmcsArity4, RecValHidingMmcs, RecValHidingScalarMmcs, RecValMmcs,
-    RecValMmcsArity4, TwoAdicFriProofTargets, Witness, verify_fri_circuit,
+    RecValMmcsArity4, ReconstructedFriRows, TwoAdicFriProofTargets, Witness, expand_fri_mmcs_paths,
+    expand_hiding_fri_mmcs_paths, expand_pruned_merkle_paths, reconstruct_two_adic_fri_rows,
+    verify_fri_circuit,
 };
 pub use mmcs::{
-    convert_merkle_proof_to_siblings, set_fri_mmcs_private_data, set_fri_mmcs_private_data_arity4,
-    set_hiding_fri_mmcs_private_data, set_hiding_fri_mmcs_private_data_arity4,
-    set_hiding_salted_fri_mmcs_private_data, set_salted_fri_mmcs_private_data,
-    set_whir_mmcs_private_data, verify_batch_circuit, verify_batch_circuit_arity4,
-    verify_batch_circuit_from_extension_opened, verify_batch_circuit_from_extension_opened_arity4,
+    ExpandedWhirMmcsPaths, convert_merkle_proof_to_siblings, set_fri_mmcs_private_data,
+    set_fri_mmcs_private_data_arity4, set_whir_mmcs_private_data, verify_batch_circuit,
+    verify_batch_circuit_arity4, verify_batch_circuit_from_extension_opened,
+    verify_batch_circuit_from_extension_opened_arity4,
 };
+pub use whir::{WhirWitnessBuildError, expand_whir_mmcs_paths};

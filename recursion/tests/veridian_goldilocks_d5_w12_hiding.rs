@@ -1,4 +1,4 @@
-//! Production-shape compatibility test for Veridian's recursive wrapper.
+//! Production-shape test for Veridian's recursive wrapper.
 //!
 //! The inner proof uses Goldilocks^5, width-12/rate-6 Poseidon2 with
 //! Veridian's exact round-constant seed, HidingFriPcs, and scalar salted
@@ -33,16 +33,19 @@ use p3_goldilocks::{Goldilocks, Poseidon2Goldilocks};
 use p3_lookup::logup::LogUpGadget;
 use p3_matrix::dense::RowMajorMatrix;
 use p3_merkle_tree::{MerkleTreeHidingMmcs, MerkleTreeMmcs};
+use p3_recursion::generation::{
+    FriGenerationParams, GenerationError, generate_batch_fri_witness_context,
+};
 use p3_recursion::pcs::fri::{
     FriVerifierParams, HidingFriProofTargets, InputProofTargets, MerkleCapTargets,
-    RecExtensionValMmcs, RecValHidingScalarMmcs, Witness,
+    RecExtensionValMmcs, RecValHidingScalarMmcs, Witness, expand_hiding_fri_mmcs_paths,
 };
-use p3_recursion::pcs::set_hiding_salted_fri_mmcs_private_data;
+use p3_recursion::pcs::set_fri_mmcs_private_data;
 use p3_recursion::{BatchStarkVerifierInputsBuilder, VerificationError, verify_batch_circuit};
 use p3_symmetric::{PaddingFreeSponge, Permutation, TruncatedPermutation};
 use p3_uni_stark::StarkConfig;
 use rand::SeedableRng;
-use rand::rngs::SmallRng;
+use rand::rngs::{SmallRng, StdRng};
 
 const VERIDIAN_POSEIDON2_SEED: u64 = 0x0056_4552_4944_414e;
 const WIDTH: usize = 12;
@@ -59,9 +62,9 @@ type Compress = TruncatedPermutation<Perm, 2, DIGEST_ELEMS, WIDTH>;
 type Challenger = DuplexChallenger<F, Perm, WIDTH, RATE>;
 
 type HidingValMmcs =
-    MerkleTreeHidingMmcs<F, F, Hash, Compress, SmallRng, 2, DIGEST_ELEMS, SALT_ELEMS>;
+    MerkleTreeHidingMmcs<F, F, Hash, Compress, StdRng, 2, DIGEST_ELEMS, SALT_ELEMS>;
 type HidingChallengeMmcs = ExtensionMmcs<F, Challenge, HidingValMmcs>;
-type HidingPcs = HidingFriPcs<F, Dft, HidingValMmcs, HidingChallengeMmcs, SmallRng>;
+type HidingPcs = HidingFriPcs<F, Dft, HidingValMmcs, HidingChallengeMmcs, StdRng>;
 type HidingConfig = StarkConfig<HidingPcs, Challenge, Challenger>;
 
 type OuterValMmcs = MerkleTreeMmcs<F, F, Hash, Compress, 2, DIGEST_ELEMS>;
@@ -70,7 +73,7 @@ type OuterPcs = TwoAdicFriPcs<F, Dft, OuterValMmcs, OuterChallengeMmcs>;
 type OuterConfig = StarkConfig<OuterPcs, Challenge, Challenger>;
 
 type RecursiveHidingValMmcs =
-    RecValHidingScalarMmcs<F, DIGEST_ELEMS, SALT_ELEMS, Hash, Compress, SmallRng>;
+    RecValHidingScalarMmcs<F, DIGEST_ELEMS, SALT_ELEMS, Hash, Compress, StdRng>;
 type InnerFri = HidingFriProofTargets<
     F,
     Challenge,
@@ -146,7 +149,7 @@ fn hiding_config(seed: u64) -> (HidingConfig, FriParameters<HidingChallengeMmcs>
     let perm = veridian_perm();
     let hash = Hash::new(perm.clone());
     let compress = Compress::new(perm.clone());
-    let val_mmcs = HidingValMmcs::new(hash, compress, 0, SmallRng::seed_from_u64(seed + 1));
+    let val_mmcs = HidingValMmcs::new(hash, compress, 0, StdRng::seed_from_u64(seed + 1));
     let challenge_mmcs = HidingChallengeMmcs::new(val_mmcs.clone());
     let fri_params = FriParameters::new_testing(challenge_mmcs, 0);
     let pcs = HidingPcs::new(
@@ -154,7 +157,7 @@ fn hiding_config(seed: u64) -> (HidingConfig, FriParameters<HidingChallengeMmcs>
         val_mmcs,
         fri_params.clone(),
         4,
-        SmallRng::seed_from_u64(seed + 2),
+        StdRng::seed_from_u64(seed + 2),
     );
     (HidingConfig::new(pcs, Challenger::new(perm)), fri_params)
 }
@@ -294,6 +297,66 @@ fn veridian_d5_w12_raw_compression_binds_every_input() {
 }
 
 #[test]
+fn hiding_host_replay_rejects_random_opening_shape_mismatch() {
+    let air = AddAir;
+    let trace = add_trace(1 << 6);
+    let public_values = vec![vec![]];
+    let (config, fri) = hiding_config(30);
+    let instances = vec![StarkInstance {
+        air: &air,
+        trace: &trace,
+        public_values: vec![],
+    }];
+    let prover_data = ProverData::from_instances(&config, &instances);
+    let common = &prover_data.common;
+    let lookup_gadget = LogUpGadget::new();
+    let verifier_lookups: Vec<Vec<_>> = common
+        .lookups
+        .iter()
+        .map(|lookups| lookups.as_ref().to_vec())
+        .collect();
+    let generation_params = FriGenerationParams {
+        log_final_height: fri.log_blowup + fri.log_final_poly_len,
+        commit_pow_bits: fri.commit_proof_of_work_bits,
+        query_pow_bits: fri.query_proof_of_work_bits,
+        num_queries: fri.num_queries,
+    };
+    let replay = |candidate| {
+        generate_batch_fri_witness_context(
+            &[air],
+            &config,
+            candidate,
+            &public_values,
+            generation_params,
+            common,
+            &lookup_gadget,
+            &verifier_lookups,
+        )
+    };
+
+    let mut short_rounds = prove_batch(&config, &instances, &prover_data);
+    short_rounds.opening_proof.0.pop();
+    assert!(matches!(
+        replay(&short_rounds),
+        Err(GenerationError::HidingRandomOpeningRoundCountMismatch { .. })
+    ));
+
+    let mut short_matrices = prove_batch(&config, &instances, &prover_data);
+    short_matrices.opening_proof.0[0].pop();
+    assert!(matches!(
+        replay(&short_matrices),
+        Err(GenerationError::HidingRandomOpeningMatrixCountMismatch { .. })
+    ));
+
+    let mut short_points = prove_batch(&config, &instances, &prover_data);
+    short_points.opening_proof.0[0][0].pop();
+    assert!(matches!(
+        replay(&short_points),
+        Err(GenerationError::HidingRandomOpeningPointCountMismatch { .. })
+    ));
+}
+
+#[test]
 fn veridian_d5_w12_hiding_proof_recurses_end_to_end() -> Result<(), VerificationError> {
     let air = AddAir;
     let trace = add_trace(1 << 6);
@@ -359,16 +422,62 @@ fn veridian_d5_w12_hiding_proof_recurses_end_to_end() -> Result<(), Verification
         !mmcs_op_ids.is_empty(),
         "the compatibility test must verify salted Merkle paths"
     );
-    set_hiding_salted_fri_mmcs_private_data::<
+    let verifier_lookups: Vec<Vec<_>> = common
+        .lookups
+        .iter()
+        .map(|lookups| lookups.as_ref().to_vec())
+        .collect();
+    let (_, fri_witness) = generate_batch_fri_witness_context(
+        &[air],
+        &recursive_config,
+        &inner_proof,
+        &public_values,
+        FriGenerationParams {
+            log_final_height: common_fri.log_blowup + common_fri.log_final_poly_len,
+            commit_pow_bits: common_fri.commit_proof_of_work_bits,
+            query_pow_bits: common_fri.query_proof_of_work_bits,
+            num_queries: common_fri.num_queries,
+        },
+        common,
+        &lookup_gadget,
+        &verifier_lookups,
+    )
+    .map_err(|error| VerificationError::InvalidProofShape(error.to_string()))?;
+    let witness_perm = veridian_perm();
+    let witness_hash = Hash::new(witness_perm.clone());
+    let witness_compress = Compress::new(witness_perm);
+    let expanded_paths = expand_hiding_fri_mmcs_paths::<
         F,
         Challenge,
-        HidingChallengeMmcs,
         HidingValMmcs,
+        HidingChallengeMmcs,
+        Hash,
+        Compress,
+        Hash,
+        Compress,
+        2,
         DIGEST_ELEMS,
+        SALT_ELEMS,
     >(
+        &inner_proof.opening_proof.1,
+        &fri_witness.input_batches,
+        fri_witness.alpha,
+        &fri_witness.betas,
+        &fri_witness.query_indices,
+        common_fri.log_blowup,
+        common_fri.log_final_poly_len,
+        &witness_hash,
+        &witness_compress,
+        0,
+        &witness_hash,
+        &witness_compress,
+        0,
+    )
+    .map_err(|error| VerificationError::InvalidProofShape(error.to_string()))?;
+    set_fri_mmcs_private_data::<F, Challenge, DIGEST_ELEMS>(
         &mut runner,
         &mmcs_op_ids,
-        &inner_proof.opening_proof,
+        &expanded_paths,
         Poseidon2Config::GOLDILOCKS_D1_W12,
     )
     .expect("failed to load scalar salted-MMCS siblings");

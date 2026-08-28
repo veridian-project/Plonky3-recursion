@@ -28,16 +28,15 @@ use p3_recursion::pcs::fri::{
     FriVerifierParams, HidingFriProofTargets, InputProofTargets, MerkleCapTargets,
     RecExtensionValMmcs, RecValMmcs, Witness,
 };
-use p3_recursion::pcs::set_fri_mmcs_private_data;
 use p3_recursion::{BatchStarkVerifierInputsBuilder, VerificationError, verify_batch_circuit};
 use p3_test_utils::koala_bear_params::*;
 use rand::SeedableRng;
-use rand::rngs::SmallRng;
+use rand::rngs::StdRng;
 
 // Non-ZK config used for the outer aggregated proof of both verification circuits.
 type MyConfig = StarkConfig<TwoAdicFriPcs<F, Dft, MyMmcs, ChallengeMmcs>, Challenge, Challenger>;
 
-type MyPcsZk = HidingFriPcs<F, Dft, MyMmcs, ChallengeMmcs, SmallRng>;
+type MyPcsZk = HidingFriPcs<F, Dft, MyMmcs, ChallengeMmcs, StdRng>;
 type MyConfigZk = StarkConfig<MyPcsZk, Challenge, Challenger>;
 type InnerFriZk = HidingFriProofTargets<
     F,
@@ -99,7 +98,7 @@ fn make_zk_config(seed: u64) -> MyConfigZk {
         val_mmcs,
         fri_params,
         2,
-        SmallRng::seed_from_u64(seed),
+        StdRng::seed_from_u64(seed),
     );
     MyConfigZk::new(pcs, Challenger::new(default_koalabear_poseidon2_16()))
 }
@@ -151,6 +150,7 @@ fn add_zk_batch_verifier_to_circuit(
             fri_params.log_final_poly_len,
             fri_params.commit_proof_of_work_bits,
             fri_params.query_proof_of_work_bits,
+            fri_params.num_queries,
         )
     };
 
@@ -236,42 +236,10 @@ fn test_zk_aggregation() -> Result<(), VerificationError> {
         .set_private_inputs(&private_inputs)
         .map_err(VerificationError::Circuit)?;
 
-    // HidingFriPcs proof is (random_opened_values, inner_fri_proof); pass the inner part.
-    if !left_op_ids.is_empty() {
-        set_fri_mmcs_private_data::<
-            F,
-            Challenge,
-            ChallengeMmcs,
-            MyMmcs,
-            MyHash,
-            MyCompress,
-            DIGEST_ELEMS,
-        >(
-            &mut runner,
-            &left_op_ids,
-            &left_data.proof.opening_proof.1,
-            Poseidon2Config::KOALA_BEAR_D4_W16,
-        )
-        .map_err(|e| VerificationError::InvalidProofShape(e.to_string()))?;
-    }
-
-    if !right_op_ids.is_empty() {
-        set_fri_mmcs_private_data::<
-            F,
-            Challenge,
-            ChallengeMmcs,
-            MyMmcs,
-            MyHash,
-            MyCompress,
-            DIGEST_ELEMS,
-        >(
-            &mut runner,
-            &right_op_ids,
-            &right_data.proof.opening_proof.1,
-            Poseidon2Config::KOALA_BEAR_D4_W16,
-        )
-        .map_err(|e| VerificationError::InvalidProofShape(e.to_string()))?;
-    }
+    assert!(
+        left_op_ids.is_empty() && right_op_ids.is_empty(),
+        "arithmetic-only aggregation verifiers must not allocate MMCS operations"
+    );
 
     let aggregation_traces = runner.run().map_err(VerificationError::Circuit)?;
 

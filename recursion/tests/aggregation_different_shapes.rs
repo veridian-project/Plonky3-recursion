@@ -12,7 +12,12 @@ use p3_circuit_prover::common::get_airs_and_degrees_with_prep;
 use p3_circuit_prover::{BatchStarkProver, CircuitProverData, ConstraintProfile, TablePacking};
 use p3_lookup::logup::LogUpGadget;
 use p3_poseidon2_circuit_air::KoalaBearD4Width16;
-use p3_recursion::pcs::fri::{FriVerifierParams, InputProofTargets, MerkleCapTargets, RecValMmcs};
+use p3_recursion::generation::{
+    FriGenerationParams, generate_batch_fri_witness_context, generate_uni_fri_witness_context,
+};
+use p3_recursion::pcs::fri::{
+    FriVerifierParams, InputProofTargets, MerkleCapTargets, RecValMmcs, expand_fri_mmcs_paths,
+};
 use p3_recursion::pcs::set_fri_mmcs_private_data;
 use p3_recursion::verifier::{verify_p3_batch_proof_circuit, verify_p3_uni_proof_circuit};
 use p3_recursion::{Poseidon2Config, StarkVerifierInputsBuilder, VerificationError};
@@ -92,7 +97,7 @@ fn test_aggregation_with_different_shapes() -> Result<(), VerificationError> {
     let mut circuit_builder = CircuitBuilder::new();
     circuit_builder.enable_poseidon2_perm::<KoalaBearD4Width16, _>(
         generate_poseidon2_trace::<Challenge, KoalaBearD4Width16>,
-        perm,
+        perm.clone(),
     );
     circuit_builder.enable_recompose::<F>(generate_recompose_trace::<F, Challenge>);
 
@@ -130,7 +135,7 @@ fn test_aggregation_with_different_shapes() -> Result<(), VerificationError> {
     // Build the verifier inputs for the Batch-Stark.
     let lookup_gadget = LogUpGadget::new();
     let batch_proof = &batch_stark_proof.proof;
-    let right_pis: Vec<Vec<F>> = vec![vec![]; 5];
+    let right_pis: Vec<Vec<F>> = vec![vec![]; airs.len()];
 
     // Verify the Batch-Stark proof.
     let (right_verifier_inputs, right_op_ids) = verify_p3_batch_proof_circuit::<
@@ -172,36 +177,109 @@ fn test_aggregation_with_different_shapes() -> Result<(), VerificationError> {
         .set_private_inputs(&private_inputs)
         .map_err(VerificationError::Circuit)?;
 
-    // Set the MMCS private data for the Uni-Stark.
-    set_fri_mmcs_private_data::<
+    let left_witness = generate_uni_fri_witness_context(
+        &air,
+        &left_config,
+        &uni_proof,
+        &pis,
+        FriGenerationParams {
+            log_final_height: left_fri_params.log_blowup + left_fri_params.log_final_poly_len,
+            commit_pow_bits: left_fri_params.commit_pow_bits,
+            query_pow_bits: left_fri_params.query_pow_bits,
+            num_queries: left_fri_params.num_queries,
+        },
+        None,
+    )
+    .map_err(|error| VerificationError::InvalidProofShape(error.to_string()))?;
+    let witness_hash = MyHash::new(perm.clone());
+    let witness_compress = MyCompress::new(perm.clone());
+    let left_paths = expand_fri_mmcs_paths::<
         F,
         Challenge,
-        ChallengeMmcs,
         MyMmcs,
+        ChallengeMmcs,
         MyHash,
         MyCompress,
+        MyHash,
+        MyCompress,
+        2,
         DIGEST_ELEMS,
     >(
+        &uni_proof.opening_proof,
+        &left_witness.input_batches,
+        left_witness.alpha,
+        &left_witness.betas,
+        &left_witness.query_indices,
+        left_fri_params.log_blowup,
+        left_fri_params.log_final_poly_len,
+        &witness_hash,
+        &witness_compress,
+        0,
+        &witness_hash,
+        &witness_compress,
+        0,
+    )
+    .map_err(|error| VerificationError::InvalidProofShape(error.to_string()))?;
+    set_fri_mmcs_private_data::<F, Challenge, DIGEST_ELEMS>(
         &mut runner,
         &left_op_ids,
-        &uni_proof.opening_proof,
+        &left_paths,
         Poseidon2Config::KOALA_BEAR_D4_W16,
     )
     .map_err(|e| VerificationError::InvalidProofShape(e.to_string()))?;
 
-    // Set the MMCS private data for the Batch-Stark.
-    set_fri_mmcs_private_data::<
+    let verifier_lookups: Vec<Vec<_>> = common
+        .lookups
+        .iter()
+        .map(|lookups| lookups.as_ref().to_vec())
+        .collect();
+    let (_, right_witness) = generate_batch_fri_witness_context(
+        &airs,
+        &right_config_verif,
+        batch_proof,
+        &right_pis,
+        FriGenerationParams {
+            log_final_height: right_fri_params.log_blowup + right_fri_params.log_final_poly_len,
+            commit_pow_bits: right_fri_params.commit_pow_bits,
+            query_pow_bits: right_fri_params.query_pow_bits,
+            num_queries: right_fri_params.num_queries,
+        },
+        common,
+        &lookup_gadget,
+        &verifier_lookups,
+    )
+    .map_err(|error| VerificationError::InvalidProofShape(error.to_string()))?;
+    let right_paths = expand_fri_mmcs_paths::<
         F,
         Challenge,
-        ChallengeMmcs,
         MyMmcs,
+        ChallengeMmcs,
         MyHash,
         MyCompress,
+        MyHash,
+        MyCompress,
+        2,
         DIGEST_ELEMS,
     >(
+        &batch_proof.opening_proof,
+        &right_witness.input_batches,
+        right_witness.alpha,
+        &right_witness.betas,
+        &right_witness.query_indices,
+        right_fri_params.log_blowup,
+        right_fri_params.log_final_poly_len,
+        &witness_hash,
+        &witness_compress,
+        0,
+        &witness_hash,
+        &witness_compress,
+        0,
+    )
+    .map_err(|error| VerificationError::InvalidProofShape(error.to_string()))?;
+    set_fri_mmcs_private_data::<F, Challenge, DIGEST_ELEMS>(
         &mut runner,
         &right_op_ids,
-        &batch_stark_proof.proof.opening_proof,
+        &right_paths,
         Poseidon2Config::KOALA_BEAR_D4_W16,
     )
     .map_err(|e| VerificationError::InvalidProofShape(e.to_string()))?;

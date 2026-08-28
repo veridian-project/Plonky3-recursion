@@ -110,7 +110,7 @@ pub const fn poseidon_preprocessed_row_width(input_limbs: usize, output_limbs: u
 /// `true` when the Poseidon AIR uses the compact D=1 preprocessed layout.
 ///
 /// Compact D=1 layout applies to arity-2 base-field instances whose capacity equals their rate.
-/// This includes both the established W16/R8 shape and Goldilocks W12/R6.
+/// This includes both the W16/R8 and Goldilocks W12/R6 shapes.
 #[inline]
 pub const fn poseidon_uses_compact_d1_preprocessed(
     poseidon_d: usize,

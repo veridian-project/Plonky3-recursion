@@ -19,18 +19,17 @@ use p3_recursion::pcs::fri::{
     FriVerifierParams, HidingFriProofTargets, InputProofTargets, MerkleCapTargets,
     RecExtensionValMmcs, RecValMmcs, Witness,
 };
-use p3_recursion::pcs::set_fri_mmcs_private_data;
 use p3_recursion::{
     BatchStarkVerifierInputsBuilder, Poseidon2Config, VerificationError, verify_batch_circuit,
 };
 use p3_test_utils::koala_bear_params::*;
 use rand::SeedableRng;
-use rand::rngs::SmallRng;
+use rand::rngs::StdRng;
 
 // Non-ZK config used for the outer recursive proof of the verification circuit.
 type MyConfig = StarkConfig<TwoAdicFriPcs<F, Dft, MyMmcs, ChallengeMmcs>, Challenge, Challenger>;
 
-type MyPcsZk = HidingFriPcs<F, Dft, MyMmcs, ChallengeMmcs, SmallRng>;
+type MyPcsZk = HidingFriPcs<F, Dft, MyMmcs, ChallengeMmcs, StdRng>;
 type MyConfigZk = StarkConfig<MyPcsZk, Challenge, Challenger>;
 type InnerFriZk = HidingFriProofTargets<
     F,
@@ -98,7 +97,7 @@ fn test_batch_verifier_zk_hiding_fri() -> Result<(), VerificationError> {
     let challenge_mmcs = ChallengeMmcs::new(val_mmcs.clone());
     let dft = Dft::default();
     let fri_params = FriParameters::new_testing(challenge_mmcs, 0);
-    let pcs_proving = MyPcsZk::new(dft, val_mmcs, fri_params, 2, SmallRng::seed_from_u64(1));
+    let pcs_proving = MyPcsZk::new(dft, val_mmcs, fri_params, 2, StdRng::seed_from_u64(1));
     let challenger_proving = Challenger::new(perm);
     let config_proving = MyConfigZk::new(pcs_proving, challenger_proving);
 
@@ -127,8 +126,9 @@ fn test_batch_verifier_zk_hiding_fri() -> Result<(), VerificationError> {
         fri_params2.log_final_poly_len,
         fri_params2.commit_proof_of_work_bits,
         fri_params2.query_proof_of_work_bits,
+        fri_params2.num_queries,
     );
-    let pcs_verif = MyPcsZk::new(dft2, val_mmcs2, fri_params2, 2, SmallRng::seed_from_u64(2));
+    let pcs_verif = MyPcsZk::new(dft2, val_mmcs2, fri_params2, 2, StdRng::seed_from_u64(2));
     let challenger_verif = Challenger::new(perm2.clone());
     let config = MyConfigZk::new(pcs_verif, challenger_verif);
 
@@ -177,25 +177,10 @@ fn test_batch_verifier_zk_hiding_fri() -> Result<(), VerificationError> {
         .set_private_inputs(&private_inputs)
         .unwrap();
 
-    // HidingFriPcs proof is (random_opened_values, inner_fri_proof); pass the inner part.
-    // With test FRI params (num_queries = 0), there may be no Merkle openings.
-    if !mmcs_op_ids.is_empty() {
-        set_fri_mmcs_private_data::<
-            F,
-            Challenge,
-            ChallengeMmcs,
-            MyMmcs,
-            MyHash,
-            MyCompress,
-            DIGEST_ELEMS,
-        >(
-            &mut verification_runner,
-            &mmcs_op_ids,
-            &batch_stark_proof.opening_proof.1,
-            Poseidon2Config::KOALA_BEAR_D4_W16,
-        )
-        .expect("Failed to set MMCS private data for ZK proof");
-    }
+    assert!(
+        mmcs_op_ids.is_empty(),
+        "arithmetic-only verifier must not allocate MMCS operations"
+    );
 
     let verification_traces = verification_runner.run().unwrap();
 
